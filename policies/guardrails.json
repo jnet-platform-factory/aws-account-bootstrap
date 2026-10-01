@@ -1,0 +1,62 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyOutsideAllowedRegions",
+      "Effect": "Deny",
+      "NotAction": [
+        "iam:*",
+        "sts:*",
+        "organizations:*",
+        "cloudfront:*",
+        "route53:*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": "{{ALLOWED_REGIONS}}"
+        }
+      }
+    },
+    {
+      "Sid": "DenyTouchingTheBootstrap",
+      "Effect": "Deny",
+      "Action": [
+        "iam:Create*",
+        "iam:Update*",
+        "iam:Delete*",
+        "iam:Put*",
+        "iam:Attach*",
+        "iam:Detach*",
+        "iam:Tag*",
+        "iam:Untag*",
+        "iam:Add*",
+        "iam:Remove*",
+        "iam:SetDefaultPolicyVersion"
+      ],
+      "Resource": "{{BOOTSTRAP_ARNS}}"
+    },
+    {
+      "Sid": "DenyLongLivedCredentials",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateAccessKey",
+        "iam:CreateLoginProfile",
+        "iam:UpdateLoginProfile"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyBreakingStateBuckets",
+      "Effect": "Deny",
+      "Action": [
+        "s3:DeleteBucket",
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy",
+        "s3:PutBucketVersioning",
+        "s3:PutLifecycleConfiguration"
+      ],
+      "Resource": "{{STATE_BUCKET_ARNS}}"
+    }
+  ]
+}

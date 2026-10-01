@@ -1,0 +1,114 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ServicesTerraformManages",
+      "Effect": "Allow",
+      "Action": [
+        "acm:*",
+        "appconfig:*",
+        "cloudfront:*",
+        "cloudwatch:*",
+        "cognito-idp:*",
+        "config:*",
+        "dynamodb:*",
+        "ec2:*",
+        "ecr:*",
+        "es:*",
+        "kms:*",
+        "logs:*",
+        "ram:*",
+        "rds:*",
+        "route53:*",
+        "s3:*",
+        "secretsmanager:*",
+        "ses:*",
+        "sns:*",
+        "ssm:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ApiGatewayVpcLinksOnly",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:GET",
+        "apigateway:POST",
+        "apigateway:PATCH",
+        "apigateway:DELETE",
+        "apigateway:PUT"
+      ],
+      "Resource": [
+        "arn:aws:apigateway:*::/vpclinks",
+        "arn:aws:apigateway:*::/vpclinks/*",
+        "arn:aws:apigateway:*::/tags/*"
+      ]
+    },
+    {
+      "Sid": "IamExceptPassRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:Get*",
+        "iam:List*",
+        "iam:Create*",
+        "iam:Update*",
+        "iam:Delete*",
+        "iam:Put*",
+        "iam:Attach*",
+        "iam:Detach*",
+        "iam:Tag*",
+        "iam:Untag*",
+        "iam:Add*",
+        "iam:Remove*",
+        "iam:SetDefaultPolicyVersion"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "PassRoleToConfiguredServices",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "config.amazonaws.com",
+            "rds.amazonaws.com",
+            "monitoring.rds.amazonaws.com",
+            "ec2.amazonaws.com",
+            "vpc-flow-logs.amazonaws.com",
+            "cognito-idp.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ReadOnlyLookups",
+      "Effect": "Allow",
+      "Action": [
+        "organizations:DescribeOrganization",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyUnexpectedServiceLinkedRoles",
+      "Effect": "Deny",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "iam:AWSServiceName": [
+            "rds.amazonaws.com",
+            "es.amazonaws.com",
+            "opensearchservice.amazonaws.com",
+            "replication.ecr.amazonaws.com",
+            "transitgateway.amazonaws.com",
+            "config.amazonaws.com",
+            "ops.apigateway.amazonaws.com"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListOwnStateKeys",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::<ACCOUNT_ID>:role/<PLATFORM_ROLE_NAME>" },
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::<STATE_BUCKET>",
+      "Condition": {
+        "StringLike": { "s3:prefix": ["<KEY_PATTERN>"] }
+      }
+    },
+    {
+      "Sid": "ReadWriteOwnState",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::<ACCOUNT_ID>:role/<PLATFORM_ROLE_NAME>" },
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::<STATE_BUCKET>/<KEY_PATTERN>"
+    }
+  ]
+}
