@@ -102,4 +102,10 @@ config_defaults() {
   export APP_EXEC_POLICY_NAME="${APP_EXEC_POLICY_NAME:-app-cfn-exec-policy}"
 
   export LAMBDA_ROLE_NAME="${LAMBDA_ROLE_NAME-lambda-test-role}"   # set to "" to skip
+
+  # Create each repository's environments and set their AWS_* variables (needs gh).
+  export CONFIGURE_GITHUB="${CONFIGURE_GITHUB:-true}"
+
+  # Where apply writes the filled-in root.hcl and workflows.
+  export OUTPUTS_DIR="${OUTPUTS_DIR:-${ROOT_DIR}/outputs}"
 }

@@ -20,10 +20,10 @@ YES    ?=
 
 # Run AWS-facing commands under aws-vault when PROFILE is given.
 AWS_EXEC := $(if $(PROFILE),aws-vault exec $(PROFILE) --,)
-RUN      := BOOTSTRAP_ENV=$(abspath $(CONFIG)) $(AWS_EXEC)
+RUN      := BOOTSTRAP_ENV=$(abspath $(CONFIG)) BOOTSTRAP_PROFILE=$(PROFILE) $(AWS_EXEC)
 
 .DEFAULT_GOAL := help
-.PHONY: help setup plan apply check lint test clean
+.PHONY: help setup plan apply check outputs examples lint test clean
 
 help: ## Show this help
 	@echo "Usage: make <target> [ENV=\"dev\"] [PROFILE=dev] [CONFIG=bootstrap.env]"
@@ -52,20 +52,28 @@ apply: ## Create or update the roles in the account
 check: _config ## Validate the policies with Access Analyzer + the IAM simulator (read-only)
 	@$(RUN) ./check-policy.sh
 
+outputs: _config ## Re-render outputs/ from the accounts already applied (no AWS)
+	@BOOTSTRAP_ENV=$(abspath $(CONFIG)) bash -c 'source lib/config.sh && config_defaults && python3 lib/outputs.py render'
+
+examples: ## Regenerate examples/ (the outputs for two made-up accounts)
+	@rm -rf examples && python3 lib/outputs.py sample examples && echo "examples/ regenerated"
+
 lint: ## shellcheck the scripts and validate the policy templates
 	@command -v shellcheck >/dev/null || { echo "shellcheck is not installed"; exit 1; }
-	shellcheck bootstrap-account.sh check-policy.sh lib/config.sh
+	shellcheck bootstrap-account.sh check-policy.sh lib/config.sh lib/github.sh
 	@for f in policies/*.json; do python3 -m json.tool "$$f" >/dev/null || { echo "invalid JSON: $$f"; exit 1; }; done
-	@python3 -m py_compile lib/render.py && rm -rf lib/__pycache__
+	@python3 -m py_compile lib/render.py lib/outputs.py && rm -rf lib/__pycache__
 	@echo "lint: ok"
 
 test: lint ## lint, then dry-run with the example config (no AWS needed)
-	@BOOTSTRAP_ENV=$(abspath bootstrap.env.example) AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+	@BOOTSTRAP_ENV=$(abspath bootstrap.env.example) CONFIGURE_GITHUB=false AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
 	  ./bootstrap-account.sh --dry-run dev production >/dev/null
-	@BOOTSTRAP_ENV=$(abspath bootstrap.env.example) APP_REPOS= LAMBDA_ROLE_NAME= \
+	@BOOTSTRAP_ENV=$(abspath bootstrap.env.example) CONFIGURE_GITHUB=false APP_REPOS= LAMBDA_ROLE_NAME= \
 	  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
 	  ./bootstrap-account.sh --dry-run dev >/dev/null
-	@echo "test: ok — both dry runs rendered every document"
+	@tmp=$$(mktemp -d) && python3 lib/outputs.py sample "$$tmp" && \
+	  { diff -r "$$tmp" examples || { echo "examples/ is stale: run make examples"; rm -rf "$$tmp"; exit 1; }; } && rm -rf "$$tmp"
+	@echo "test: ok — both dry runs rendered every document, examples/ is current"
 
 clean: ## Remove local caches
 	rm -rf lib/__pycache__

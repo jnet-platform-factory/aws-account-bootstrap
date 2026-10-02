@@ -15,7 +15,14 @@
 #   Test
 #     lambda-test-role        logs-only role for hand-made Lambdas (optional)
 #
-# Nothing else: no VPC, security group, bucket or function.
+#   GitHub (with the gh CLI; CONFIGURE_GITHUB=false to skip)
+#     each repository's environments, created if missing, with the variables
+#     AWS_ACCOUNT_ID, AWS_REGION and the ARNs of the roles it may assume
+#   Locally, in OUTPUTS_DIR (default ./outputs)
+#     root.hcl and GitHub Actions workflows filled in for every account applied so
+#     far, ready to copy into the repositories
+#
+# Nothing else in AWS: no VPC, security group, bucket or function.
 #
 # Usage:
 #   ./bootstrap-account.sh [--dry-run] [--yes] [<github-environment>...]
@@ -35,6 +42,8 @@
 set -euo pipefail
 # shellcheck source=lib/config.sh
 source "$(dirname "$0")/lib/config.sh"
+# shellcheck source=lib/github.sh
+source "$(dirname "$0")/lib/github.sh"
 
 DRY_RUN=0
 ASSUME_YES=0
@@ -43,7 +52,7 @@ for arg in "$@"; do
   case "${arg}" in
     --dry-run) DRY_RUN=1 ;;
     --yes|-y)  ASSUME_YES=1; INTERACTIVE=0 ;;   # unattended: never prompt
-    -h|--help) sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)        die "unknown option ${arg}" ;;
     *)         env_args+=("${arg}") ;;
   esac
@@ -57,7 +66,9 @@ if ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/de
   HAVE_CREDENTIALS=1
   account_label="${ACCOUNT_ID}"
   alias="$(aws iam list-account-aliases --query 'AccountAliases[0]' --output text 2>/dev/null || true)"
-  [[ -n "${alias}" && "${alias}" != "None" ]] && account_label="${ACCOUNT_ID} (${alias})"
+  [[ "${alias}" == "None" ]] && alias=""
+  [[ -n "${alias}" ]] && account_label="${ACCOUNT_ID} (${alias})"
+  export ACCOUNT_ALIAS="${alias}"
 elif (( DRY_RUN )); then
   ACCOUNT_ID="${ACCOUNT_ID:-123456789012}"
   HAVE_CREDENTIALS=0
@@ -171,6 +182,7 @@ if [[ -n "${LAMBDA_ROLE_NAME}" ]]; then
   echo "  IAM role       ${LAMBDA_ROLE_NAME}  AWSLambdaBasicExecutionRole, assumable by Lambda in this account"
 fi
 for w in "${trust_warnings[@]+"${trust_warnings[@]}"}"; do echo; echo "  WARNING: ${w}"; done
+github_sync plan
 
 if (( DRY_RUN )); then
   for f in "${WORK}"/*.json; do echo; echo "── $(basename "$f")"; cat "$f"; done
@@ -285,6 +297,9 @@ if [[ -n "${LAMBDA_ROLE_NAME}" ]]; then
     --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 fi
 
+# After the roles, so no variable ever points at a role that failed to appear.
+github_sync apply
+
 echo
 echo "Done:"
 echo "  ${OIDC_ARN}"
@@ -294,4 +309,10 @@ for role in "${PLATFORM_ROLE_NAME}" \
             "${LAMBDA_ROLE_NAME}"; do
   [[ -n "${role}" ]] && echo "  arn:aws:iam::${ACCOUNT_ID}:role/${role}"
 done
+
+echo
+echo "Ready to copy into the repositories:"
+python3 "${LIB_DIR}/outputs.py" record
+python3 "${LIB_DIR}/outputs.py" render
+(( GITHUB_FAILURES == 0 )) || die "the roles are in place, but ${GITHUB_FAILURES} GitHub step(s) failed; see the warnings above"
 exit 0

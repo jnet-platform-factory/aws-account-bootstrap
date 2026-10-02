@@ -25,6 +25,7 @@ ROLE is platform, app or app-exec.
 """
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -107,6 +108,32 @@ def permissions(role):
     )
 
 
+def subject_prefixes(org, repo):
+    """Every `sub` prefix GitHub may put in this repository's tokens.
+
+    With immutable subject claims on, GitHub sends
+    `repo:<org>@<org id>/<repo>@<repo id>:...` instead of `repo:<org>/<repo>:...`,
+    and a trust policy naming only the second refuses every token with a bare
+    "Not authorized to perform sts:AssumeRoleWithWebIdentity". The ids cannot be
+    derived from the names, so they are looked up. Without gh, or for a
+    repository gh cannot see, only the name form is trusted — which is what the
+    trust policy said before this lookup existed.
+    """
+    prefixes = [f"repo:{org}/{repo}"]
+    try:
+        out = subprocess.run(
+            ["gh", "api", f"repos/{org}/{repo}/actions/oidc/customization/sub"],
+            capture_output=True, text=True, timeout=20, check=True,
+        ).stdout
+        setting = json.loads(out)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return prefixes
+    immutable = setting.get("sub_claim_prefix", "")
+    if setting.get("use_immutable_subject") and immutable and immutable not in prefixes:
+        prefixes.append(immutable)
+    return prefixes
+
+
 def trust(role):
     prefix = {"platform": "PLATFORM", "app": "APP"}.get(role)
     if not prefix:
@@ -115,6 +142,7 @@ def trust(role):
     repos, envs = env_list(f"{prefix}_REPOS"), env_list(f"{prefix}_ENVIRONMENTS")
     if not repos or not envs:
         sys.exit(f"render.py: {prefix}_REPOS and {prefix}_ENVIRONMENTS must both be non-empty")
+    subjects = [f"{p}:environment:{e}" for r in repos for p in subject_prefixes(org, r) for e in envs]
     return {
         "Version": "2012-10-17",
         "Statement": [{
@@ -124,7 +152,7 @@ def trust(role):
             "Action": "sts:AssumeRoleWithWebIdentity",
             "Condition": {"StringEquals": {
                 f"{OIDC_HOST}:aud": "sts.amazonaws.com",
-                f"{OIDC_HOST}:sub": [f"repo:{org}/{r}:environment:{e}" for r in repos for e in envs],
+                f"{OIDC_HOST}:sub": subjects,
             }},
         }],
     }
