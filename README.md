@@ -50,7 +50,8 @@ scoped policy leaves out. Inline policies are reported, never deleted.
 
 It is safe to re-run: existing resources are kept, trust policies are rewritten, and a
 permissions policy gets a new default version only if its rendered JSON changed.
-Re-running is how you add a repository or an environment.
+Re-running is how you add a repository or an environment — see
+[Re-running](#re-running-adding-a-repository-or-an-environment).
 
 ### Why two roles for applications
 
@@ -114,14 +115,14 @@ put it in a dedicated deployment account.
 
 ## Usage
 
-| Command | What it does |
-| --- | --- |
-| `make plan [ENV=…] [PROFILE=…]` | Prints the plan and every rendered policy. Changes nothing. Works without credentials, against a placeholder account |
-| `make apply [ENV=…] [PROFILE=…] [YES=1]` | Creates or updates the roles. Asks for confirmation unless `YES=1` |
-| `make check [PROFILE=…]` | Access Analyzer and IAM simulator checks. Read-only |
-| `make setup` | Copies `bootstrap.env.example` to `bootstrap.env`, if you prefer editing to answering |
-| `make lint` / `make test` | shellcheck and JSON checks / plus two dry runs, no AWS needed |
-| `make` | Help |
+| Command                                  | What it does                                                                                                         |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `make plan [ENV=…] [PROFILE=…]`          | Prints the plan and every rendered policy. Changes nothing. Works without credentials, against a placeholder account |
+| `make apply [ENV=…] [PROFILE=…] [YES=1]` | Creates or updates the roles. Asks for confirmation unless `YES=1`                                                   |
+| `make check [PROFILE=…]`                 | Access Analyzer and IAM simulator checks. Read-only                                                                  |
+| `make setup`                             | Copies `bootstrap.env.example` to `bootstrap.env`, if you prefer editing to answering                                |
+| `make lint` / `make test`                | shellcheck and JSON checks / plus two dry runs, no AWS needed                                                        |
+| `make`                                   | Help                                                                                                                 |
 
 `CONFIG=path` points every target at another config file — one per organisation, for
 example. The scripts run directly too: `./bootstrap-account.sh --help`.
@@ -131,6 +132,127 @@ where there is one (your organisation is guessed from the git remote of the dire
 you run it in). Answers can be saved to the config file; environments are never saved,
 because they differ per account. With `--yes` (`YES=1`), or with no terminal — CI —
 nothing is asked, and a missing required value is an error.
+
+### A first run
+
+`make plan` asks for what it is missing, prints the plan, and offers to save the
+answers. The environment it asks for is a GitHub environment name — the one in each
+repository's _Settings → Environments_ and in the workflow's `environment:` — not an
+account ID.
+
+```
+$ make plan PROFILE=dev
+Bootstrapping account 123456789012 (my-org-dev). A few questions first (Ctrl-C to stop).
+
+GitHub organisation (or user) that owns the repositories: my-org
+Repositories that run Terraform (space-separated, without the org): infrastructure
+Repositories that deploy SAM / CloudFormation apps (blank: no app roles): api-service worker-service
+GitHub environment(s) that may run Terraform in account 123456789012: dev
+GitHub environment(s) that may deploy apps in account 123456789012 [dev]:
+Region(s) the roles may act in [us-east-1]:
+
+Account 123456789012 (my-org-dev)
+  OIDC provider  token.actions.githubusercontent.com
+
+ Platform
+  IAM role       platform-deploy-role
+                 assumed by 1 repo(s) in my-org, environment(s): dev
+                 policy platform-deploy-policy (2595 / 6144 characters)
+
+ Apps
+  IAM role       app-deploy-role
+                 assumed by 2 repo(s) in my-org, environment(s): dev
+                 policy app-deploy-policy (3744 / 6144 characters)
+  IAM role       app-cfn-exec-role
+                 assumed by cloudformation.amazonaws.com in this account, when passed by app-deploy-role
+                 policy app-cfn-exec-policy (3615 / 6144 characters)
+
+ Test
+  IAM role       lambda-test-role  AWSLambdaBasicExecutionRole, assumable by Lambda in this account
+
+── app-exec-permissions.json
+…                                     every rendered policy and trust document follows
+
+Save these answers to ./bootstrap.env? [Y/n] y
+  saved
+```
+
+From then on only the environment is needed. `apply` shows the same plan, without the
+documents, and asks before changing anything:
+
+```
+$ make apply PROFILE=dev ENV=dev
+…                                     the plan, as above
+Proceed? [y/N] y
+
+  OIDC provider: created
+  platform-deploy-policy: created
+  platform-deploy-role: created
+  app-cfn-exec-policy: created
+  app-cfn-exec-role: created
+  app-deploy-policy: created
+  app-deploy-role: created
+  lambda-test-role: created
+
+Done:
+  arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com
+  arn:aws:iam::123456789012:role/platform-deploy-role
+  arn:aws:iam::123456789012:role/app-deploy-role
+  arn:aws:iam::123456789012:role/app-cfn-exec-role
+  arn:aws:iam::123456789012:role/lambda-test-role
+```
+
+### Re-running: adding a repository or an environment
+
+Edit `bootstrap.env` and run `apply` again. Here `billing-service` was added to
+`APP_REPOS`:
+
+```
+$ make apply PROFILE=dev ENV=dev
+…
+ Apps
+  IAM role       app-deploy-role
+                 assumed by 3 repo(s) in my-org, environment(s): dev
+…
+Proceed? [y/N] y
+
+  OIDC provider: exists
+  platform-deploy-policy: up to date
+  platform-deploy-role: exists, trust policy rewritten
+  app-cfn-exec-policy: up to date
+  app-cfn-exec-role: exists, trust policy rewritten
+  app-deploy-policy: up to date
+  app-deploy-role: exists, trust policy rewritten
+  lambda-test-role: exists, trust policy rewritten
+```
+
+Only the trust policies changed; the permissions policies were compared and left alone.
+A role's trust policy is always rewritten, even when the result is identical, and a
+permissions policy prints `new default version` only when its JSON actually changed.
+
+- **The lists replace, they do not add.** Each trust policy is rebuilt from the current
+  `PLATFORM_REPOS` / `APP_REPOS` and environments. Give the full list every time: a run
+  with only the new repository locks out all the others.
+- **Change `bootstrap.env`, not the prompt.** A value in the config file is never asked
+  for again, and the script never rewrites an existing config file — it prints the
+  lines to add instead. For one run, an environment variable wins over the file:
+  `APP_REPOS="api-service worker-service billing-service" make plan PROFILE=dev ENV=dev`.
+- **Pass the environments every run.** They are never saved, because they differ per
+  account. To allow several, list them all: `ENV="dev preview"`.
+- **Run `make plan` first.** It prints the exact trust policy, so you can check the
+  `repo:<org>/<repo>:environment:<env>` subjects before anything changes.
+- **Spell `GITHUB_ORG` the way GitHub does.** IAM compares the OIDC subject
+  case-sensitively, and GitHub writes the organisation as its canonical login, so
+  `My-Org` does not match a token for `my-org`. Check with
+  `gh api orgs/<org> --jq .login` (or `users/<name>` for a personal account).
+
+Re-running only ever creates or updates. It does not converge in these cases:
+
+- **Emptying `APP_REPOS`** skips the app roles; existing ones are left in place with their
+  old trust policy. Delete them by hand if they should go.
+- **Renaming** a role or policy creates a new one and leaves the old one behind,
+  unprotected by the guardrails.
+- **Descriptions, tags and session duration** of an existing role are left as they were.
 
 ## Configuration
 
