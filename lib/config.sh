@@ -23,6 +23,15 @@ export OIDC_HOST="token.actions.githubusercontent.com"
 render() { python3 "${LIB_DIR}/render.py" "$@"; }
 die() { echo "error: $*" >&2; exit 1; }
 
+# is_yes <value>: true for yes/y/true/1, false for no/n/false/0/empty, else an error.
+is_yes() {
+  case "$(tr '[:upper:]' '[:lower:]' <<<"$1")" in
+    yes|y|true|1) return 0 ;;
+    no|n|false|0|"") return 1 ;;
+    *) die "expected yes or no, got '$1'" ;;
+  esac
+}
+
 # --- Interactive prompts -------------------------------------------------------
 INTERACTIVE=0; [[ -t 0 ]] && INTERACTIVE=1
 ANSWERED=()   # variables set by a prompt, offered for saving afterwards
@@ -102,6 +111,13 @@ config_defaults() {
   export APP_EXEC_POLICY_NAME="${APP_EXEC_POLICY_NAME:-app-cfn-exec-policy}"
 
   export LAMBDA_ROLE_NAME="${LAMBDA_ROLE_NAME-lambda-test-role}"   # set to "" to skip
+
+  # Security group for VPC-attached functions. Whether an account gets one, and
+  # in which VPC, is asked per account (SECURITY_GROUP, SECURITY_GROUP_VPC_ID).
+  export SECURITY_GROUP_NAME="${SECURITY_GROUP_NAME:-app-default-sg}"
+  # Where the group's id and the VPC's subnets are published:
+  # <prefix>/security_group_id and <prefix>/subnet_ids.
+  export VPC_SSM_PREFIX="${VPC_SSM_PREFIX-/default/vpc}"   # set to "" to skip
 
   # Create each repository's environments and set their AWS_* variables (needs gh).
   export CONFIGURE_GITHUB="${CONFIGURE_GITHUB:-true}"

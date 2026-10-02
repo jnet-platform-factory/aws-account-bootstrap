@@ -21,7 +21,8 @@ credentials you already have.
 ## What it creates
 
 In the account your credentials belong to, and in the GitHub environments that deploy
-to it. Nothing else — no VPC, no security group, no bucket, no function.
+to it — and, only if you answer yes, one security group. Nothing else — no VPC, no
+subnet, no bucket, no function.
 
 ```
                           ┌─────────────────────────────┐
@@ -42,8 +43,36 @@ to it. Nothing else — no VPC, no security group, no bucket, no function.
 | **App execution** role      | `app-cfn-exec-role`                   | `cloudformation.amazonaws.com`, this account only       | `app-cfn-exec-policy` — the resources your application templates declare                                                                             |
 | Test Lambda role (optional) | `lambda-test-role`                    | `lambda.amazonaws.com`, this account only               | `AWSLambdaBasicExecutionRole` — write logs, nothing else                                                                                             |
 
+| Security group (optional)   | `app-default-sg`                      | VPC-attached functions, via their `VpcConfig`           | All egress, no ingress. Published to SSM with the VPC's subnets — see below                                                                          |
+
 The app roles are skipped when `APP_REPOS` is empty, the test role when
-`LAMBDA_ROLE_NAME` is empty. Everything is tagged `ManagedBy=aws-account-bootstrap`.
+`LAMBDA_ROLE_NAME` is empty.
+
+**The security group is asked for on every run**, per account, as the environments
+are: whether to create one (`SECURITY_GROUP=yes`), and in which VPC
+(`SECURITY_GROUP_VPC_ID`, default: the default VPC of the first allowed region). The
+group is created with no ingress rule and the default allow-all egress rule, so it
+restricts nothing. Two SSM parameters, in that region, are what a template's
+`VpcConfig` reads:
+
+| Parameter                        | Type         | Value                                         |
+| -------------------------------- | ------------ | --------------------------------------------- |
+| `/default/vpc/security_group_id` | `String`     | The group's id                                |
+| `/default/vpc/subnet_ids`        | `StringList` | The VPC's private subnets, read on each run   |
+
+```yaml
+SubnetIds:       { Type: "AWS::SSM::Parameter::Value<List<String>>", Default: /default/vpc/subnet_ids }
+SecurityGroupId: { Type: "AWS::SSM::Parameter::Value<String>",       Default: /default/vpc/security_group_id }
+```
+
+**Private** means the subnet's route table has no route to an internet gateway. A VPC
+with none — the default VPC — has all of its subnets published instead, and the plan
+says so: those functions reach AWS services but not the internet.
+
+Both are tagged `ManagedBy=aws-account-bootstrap` and kept current on re-runs — a
+subnet added to the VPC is picked up next time. One that exists **without** that tag
+was written by something else and is left alone, with a warning. `VPC_SSM_PREFIX`
+changes the `/default/vpc` prefix. Everything is tagged `ManagedBy=aws-account-bootstrap`.
 
 **Each deploy role ends up with exactly one managed policy.** If a role already exists
 with `AdministratorAccess`, `PowerUserAccess` or anything else attached, the plan lists
@@ -137,8 +166,12 @@ nothing can widen itself.
 
 ### What it does not create, and why
 
-- **Security groups.** A security group belongs to a VPC, and your VPCs are created by
-  Terraform, after this runs. A test Lambda outside a VPC needs none.
+- **VPCs and subnets.** Your VPCs are created by Terraform, after this runs. The
+  optional security group only needs a VPC to exist, and the default VPC will do.
+  **A function in the default VPC's subnets has no internet access** — they are public
+  subnets, and Lambda never gives its network interfaces a public IP — so a function
+  that calls anything outside AWS needs private subnets behind a NAT gateway, which
+  this does not create.
 - **Application roles.** The roles your functions run as come from your SAM templates —
   `app-cfn-exec-role` creates them per stack. `lambda-test-role` is for experiments only.
 - **The Terraform state backend.** See [Terraform state](#terraform-state).
@@ -177,7 +210,7 @@ put it in a dedicated deployment account.
 | `make outputs`                           | Rebuilds `outputs/` from the accounts already applied. No AWS                                                        |
 | `make examples`                          | Regenerates [`examples/`](examples/): the outputs for two made-up accounts                                           |
 | `make setup`                             | Copies `bootstrap.env.example` to `bootstrap.env`, if you prefer editing to answering                                |
-| `make lint` / `make test`                | shellcheck and JSON checks / plus two dry runs, no AWS needed                                                        |
+| `make lint` / `make test`                | shellcheck and JSON checks / plus four dry runs, no AWS needed                                                       |
 | `make`                                   | Help                                                                                                                 |
 
 `CONFIG=path` points every target at another config file — one per organisation, for
@@ -185,8 +218,8 @@ example. The scripts run directly too: `./bootstrap-account.sh --help`.
 
 **Anything missing is asked for** when you run interactively, with a sensible default
 where there is one (your organisation is guessed from the git remote of the directory
-you run it in). Answers can be saved to the config file; environments are never saved,
-because they differ per account. With `--yes` (`YES=1`), or with no terminal — CI —
+you run it in). Answers can be saved to the config file; environments and the security
+group are never saved, because they differ per account. With `--yes` (`YES=1`), or with no terminal — CI —
 nothing is asked, and a missing required value is an error.
 
 ### A first run
@@ -362,6 +395,10 @@ environment, which wins.
 | `APP_ROLE_NAME` / `APP_POLICY_NAME`           | `app-deploy-role` / `-policy`      |                                                                       |
 | `APP_EXEC_ROLE_NAME` / `APP_EXEC_POLICY_NAME` | `app-cfn-exec-role` / `-policy`    |                                                                       |
 | `LAMBDA_ROLE_NAME`                            | `lambda-test-role`                 | Set to `""` to skip                                                   |
+| `SECURITY_GROUP`                              | asked; `no` without a terminal     | Create the security group in this account. Never saved                |
+| `SECURITY_GROUP_VPC_ID`                       | asked; the default VPC             | The VPC it goes in, in the first allowed region. Never saved          |
+| `SECURITY_GROUP_NAME`                         | `app-default-sg`                   |                                                                       |
+| `VPC_SSM_PREFIX`                              | `/default/vpc`                     | Prefix for `subnet_ids` and `security_group_id`. `""` to skip         |
 | `CONFIGURE_GITHUB`                            | `true`                             | Create the GitHub environments and set their variables (needs `gh`)   |
 | `OUTPUTS_DIR`                                 | `./outputs`                        | Where apply records accounts and writes the files to copy             |
 | `BOOTSTRAP_ENV`                               | `./bootstrap.env`                  | Alternative config file                                               |

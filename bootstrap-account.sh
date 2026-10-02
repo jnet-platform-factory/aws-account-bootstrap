@@ -14,6 +14,11 @@
 #     app-cfn-exec-role       assumed by CloudFormation; creates the app resources
 #   Test
 #     lambda-test-role        logs-only role for hand-made Lambdas (optional)
+#   Network — only when you answer yes (SECURITY_GROUP=yes)
+#     app-default-sg          security group for VPC-attached functions, in one
+#                             VPC: all egress, no ingress. Published to SSM:
+#                             /default/vpc/security_group_id  the group's id
+#                             /default/vpc/subnet_ids         the VPC's subnets
 #
 #   GitHub (with the gh CLI; CONFIGURE_GITHUB=false to skip)
 #     each repository's environments, created if missing, with the variables
@@ -22,7 +27,7 @@
 #     root.hcl and GitHub Actions workflows filled in for every account applied so
 #     far, ready to copy into the repositories
 #
-# Nothing else in AWS: no VPC, security group, bucket or function.
+# Nothing else in AWS: no VPC, subnet, bucket or function.
 #
 # Usage:
 #   ./bootstrap-account.sh [--dry-run] [--yes] [<github-environment>...]
@@ -102,10 +107,29 @@ fi
 ask ALLOWED_REGIONS "Region(s) the roles may act in" "us-east-1"
 export PLATFORM_ENVIRONMENTS APP_ENVIRONMENTS="${APP_ENVIRONMENTS:-}"
 
-# Environments are per account, so they are not offered for saving.
+# The security group is per account: whether to create one, and in which VPC.
+# It goes in the first allowed region, the one AWS_REGION names in GitHub.
+read -r -a allowed_regions <<<"${ALLOWED_REGIONS}"
+SG_REGION="${allowed_regions[0]}"
+ask SECURITY_GROUP "Create a security group for VPC-attached functions in account ${ACCOUNT_ID}? (yes/no)" "no"
+WITH_SG=0; is_yes "${SECURITY_GROUP}" && WITH_SG=1
+if (( WITH_SG )); then
+  default_vpc=""
+  if (( HAVE_CREDENTIALS )); then
+    default_vpc="$(aws ec2 describe-vpcs --region "${SG_REGION}" --filters Name=is-default,Values=true \
+                     --query 'Vpcs[0].VpcId' --output text 2>/dev/null || true)"
+    [[ "${default_vpc}" == "None" ]] && default_vpc=""
+  else
+    default_vpc="vpc-00000000000000000"   # placeholder for a dry run without credentials
+  fi
+  ask SECURITY_GROUP_VPC_ID "VPC for the security group, in ${SG_REGION} (default: the default VPC)" "${default_vpc}"
+fi
+
+# Environments and the security group are per account, so they are not offered
+# for saving.
 saveable=()
 for var in "${ANSWERED[@]+"${ANSWERED[@]}"}"; do
-  [[ "${var}" == *_ENVIRONMENTS ]] || saveable+=("${var}")
+  [[ "${var}" == *_ENVIRONMENTS || "${var}" == SECURITY_GROUP* ]] || saveable+=("${var}")
 done
 ANSWERED=("${saveable[@]+"${saveable[@]}"}")
 
@@ -148,6 +172,61 @@ others_attached() {
     --query 'AttachedPolicies[].PolicyArn' --output text | tr '\t' '\n' | grep -vxF "$2" || true
 }
 
+# The security group by name in its VPC, the VPC's subnets, and what an SSM
+# parameter holds today - and whether this bootstrap is the one that wrote it.
+existing_sg() {
+  (( HAVE_CREDENTIALS )) || return 0
+  aws ec2 describe-security-groups --region "${SG_REGION}" \
+    --filters "Name=vpc-id,Values=${SECURITY_GROUP_VPC_ID}" "Name=group-name,Values=${SECURITY_GROUP_NAME}" \
+    --query 'SecurityGroups[0].GroupId' --output text | grep -vx None || true
+}
+# vpc_subnets prints "<private|public> <ids, comma-separated and sorted>". Only the
+# private subnets when the VPC has any - a function in a public subnet has no
+# internet access, since Lambda never gives it a public IP - and every subnet
+# otherwise, which is the default VPC's case.
+vpc_subnets() {
+  (( HAVE_CREDENTIALS )) || { echo "private subnet-00000000000000000,subnet-11111111111111111"; return 0; }
+  python3 - \
+    "$(aws ec2 describe-subnets --region "${SG_REGION}" --filters "Name=vpc-id,Values=${SECURITY_GROUP_VPC_ID}" --output json)" \
+    "$(aws ec2 describe-route-tables --region "${SG_REGION}" --filters "Name=vpc-id,Values=${SECURITY_GROUP_VPC_ID}" --output json)" <<'PY'
+import json, sys
+
+subnets = [s["SubnetId"] for s in json.loads(sys.argv[1])["Subnets"]]
+tables = json.loads(sys.argv[2])["RouteTables"]
+main = next((t for t in tables if any(a.get("Main") for a in t["Associations"])), {"Routes": []})
+
+
+def table(subnet):
+    return next((t for t in tables if any(a.get("SubnetId") == subnet for a in t["Associations"])), main)
+
+
+def public(subnet):
+    return any(
+        r.get("GatewayId", "").startswith("igw-")
+        and (r.get("DestinationCidrBlock") == "0.0.0.0/0" or r.get("DestinationIpv6CidrBlock") == "::/0")
+        for r in table(subnet)["Routes"]
+    )
+
+
+private = sorted(s for s in subnets if not public(s))
+print("private" if private else "public", ",".join(private or sorted(subnets)))
+PY
+}
+param_value() {
+  (( HAVE_CREDENTIALS )) || return 0
+  aws ssm get-parameter --region "${SG_REGION}" --name "$1" \
+    --query Parameter.Value --output text 2>/dev/null || true
+}
+param_is_ours() {
+  [[ "$(aws ssm list-tags-for-resource --region "${SG_REGION}" --resource-type Parameter --resource-id "$1" \
+          --query "TagList[?Key=='ManagedBy'].Value" --output text 2>/dev/null)" == aws-account-bootstrap ]]
+}
+
+if (( WITH_SG && HAVE_CREDENTIALS )); then
+  aws ec2 describe-vpcs --region "${SG_REGION}" --vpc-ids "${SECURITY_GROUP_VPC_ID}" >/dev/null 2>&1 ||
+    die "VPC ${SECURITY_GROUP_VPC_ID} not found in ${SG_REGION} in account ${ACCOUNT_ID}"
+fi
+
 # --- Plan ---------------------------------------------------------------------
 plan_role() {  # plan_role <role> <policy> <permissions-file> <who-assumes>
   echo "  IAM role       $1"
@@ -180,6 +259,41 @@ if [[ -n "${LAMBDA_ROLE_NAME}" ]]; then
   echo
   echo " Test"
   echo "  IAM role       ${LAMBDA_ROLE_NAME}  AWSLambdaBasicExecutionRole, assumable by Lambda in this account"
+fi
+# plan_param <name> <value, empty when only known after apply> <what that value is>
+plan_param() {
+  local now; now="$(param_value "$1")"
+  if [[ -z "${now}" ]]; then
+    echo "  SSM parameter  $1 = ${2:-$3}  (to create)"
+  elif [[ "${now}" == "$2" ]]; then
+    echo "  SSM parameter  $1 = ${now}  (up to date)"
+  elif param_is_ours "$1"; then
+    echo "  SSM parameter  $1 = ${2:-$3}  (to update, was ${now})"
+  else
+    echo "  SSM parameter  $1 = ${now}"
+    echo "  WARNING: not written by aws-account-bootstrap, so it is left as it is. Delete it first to hand it over."
+  fi
+}
+
+if (( WITH_SG )); then
+  sg_now="$(existing_sg)"
+  read -r subnet_kind subnets <<<"$(vpc_subnets)"
+  echo
+  echo " Network"
+  echo "  Security group ${SECURITY_GROUP_NAME} in ${SECURITY_GROUP_VPC_ID} (${SG_REGION}): all egress, no ingress"
+  if [[ -n "${sg_now}" ]]; then echo "                 exists, ${sg_now}"; else echo "                 to create"; fi
+  if [[ -n "${VPC_SSM_PREFIX}" ]]; then
+    if [[ -n "${subnets}" ]]; then
+      plan_param "${VPC_SSM_PREFIX}/subnet_ids" "${subnets}" ""
+    else
+      echo "  WARNING: ${SECURITY_GROUP_VPC_ID} has no subnets, so ${VPC_SSM_PREFIX}/subnet_ids is not published"
+    fi
+    plan_param "${VPC_SSM_PREFIX}/security_group_id" "${sg_now}" "the new group's id"
+  fi
+  if [[ -n "${subnets}" && "${subnet_kind}" == "public" ]]; then
+    echo "  NOTE: ${SECURITY_GROUP_VPC_ID} has no private subnets, so all of its subnets are published. Lambda never"
+    echo "        gives a function a public IP, so one attached to them reaches AWS services but not the internet."
+  fi
 fi
 for w in "${trust_warnings[@]+"${trust_warnings[@]}"}"; do echo; echo "  WARNING: ${w}"; done
 github_sync plan
@@ -297,6 +411,54 @@ if [[ -n "${LAMBDA_ROLE_NAME}" ]]; then
     --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 fi
 
+# No ingress rule, and the default egress rule a new group gets (all traffic,
+# 0.0.0.0/0) left in place: nothing is restricted yet.
+#
+# publish_param <name> <type> <value> <description>. A parameter this bootstrap
+# wrote (tagged ManagedBy) is kept current; one written by anything else is never
+# overwritten, because something else depends on what it says.
+publish_param() {
+  local now; now="$(param_value "$1")"
+  if [[ -z "${now}" ]]; then
+    aws ssm put-parameter --region "${SG_REGION}" --name "$1" --type "$2" --value "$3" \
+      --description "$4" --tags "${TAGS[@]}" >/dev/null
+    echo "  $1: created"
+  elif [[ "${now}" == "$3" ]]; then
+    echo "  $1: up to date"
+  elif param_is_ours "$1"; then
+    aws ssm put-parameter --region "${SG_REGION}" --name "$1" --type "$2" --value "$3" --overwrite >/dev/null
+    echo "  $1: updated (was ${now})"
+  else
+    echo "  WARNING: $1 holds ${now} and was not written by aws-account-bootstrap; left as it is" >&2
+  fi
+}
+
+SG_ID=""
+if (( WITH_SG )); then
+  SG_ID="$(existing_sg)"
+  if [[ -n "${SG_ID}" ]]; then
+    echo "  ${SECURITY_GROUP_NAME}: exists (${SG_ID})"
+  else
+    SG_ID="$(aws ec2 create-security-group --region "${SG_REGION}" \
+      --group-name "${SECURITY_GROUP_NAME}" --vpc-id "${SECURITY_GROUP_VPC_ID}" \
+      --description "Security group for VPC-attached functions. All egress, no ingress." \
+      --tag-specifications "ResourceType=security-group,Tags=[{Key=ManagedBy,Value=aws-account-bootstrap},{Key=Name,Value=${SECURITY_GROUP_NAME}}]" \
+      --query GroupId --output text)"
+    echo "  ${SECURITY_GROUP_NAME}: created (${SG_ID})"
+  fi
+  if [[ -n "${VPC_SSM_PREFIX}" ]]; then
+    read -r _ subnets <<<"$(vpc_subnets)"
+    if [[ -n "${subnets}" ]]; then
+      publish_param "${VPC_SSM_PREFIX}/subnet_ids" StringList "${subnets}" \
+        "Subnets of ${SECURITY_GROUP_VPC_ID} for VPC-attached functions: the private ones, or all if none are (aws-account-bootstrap)"
+    else
+      echo "  WARNING: ${SECURITY_GROUP_VPC_ID} has no subnets; ${VPC_SSM_PREFIX}/subnet_ids not published" >&2
+    fi
+    publish_param "${VPC_SSM_PREFIX}/security_group_id" String "${SG_ID}" \
+      "Security group for VPC-attached functions (aws-account-bootstrap)"
+  fi
+fi
+
 # After the roles, so no variable ever points at a role that failed to appear.
 github_sync apply
 
@@ -309,6 +471,7 @@ for role in "${PLATFORM_ROLE_NAME}" \
             "${LAMBDA_ROLE_NAME}"; do
   [[ -n "${role}" ]] && echo "  arn:aws:iam::${ACCOUNT_ID}:role/${role}"
 done
+[[ -n "${SG_ID}" ]] && echo "  ${SG_ID} (${SECURITY_GROUP_NAME}, ${SECURITY_GROUP_VPC_ID})"
 
 echo
 echo "Ready to copy into the repositories:"

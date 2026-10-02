@@ -71,9 +71,15 @@ test: lint ## lint, then dry-run with the example config (no AWS needed)
 	@BOOTSTRAP_ENV=$(abspath bootstrap.env.example) CONFIGURE_GITHUB=false APP_REPOS= LAMBDA_ROLE_NAME= \
 	  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
 	  ./bootstrap-account.sh --dry-run dev >/dev/null
+	@BOOTSTRAP_ENV=$(abspath bootstrap.env.example) CONFIGURE_GITHUB=false SECURITY_GROUP=yes \
+	  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+	  ./bootstrap-account.sh --dry-run dev | grep 'Security group app-default-sg' >/dev/null
+	@BOOTSTRAP_ENV=$(abspath bootstrap.env.example) CONFIGURE_GITHUB=false \
+	  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+	  ./bootstrap-account.sh --dry-run dev | { ! grep 'Security group' >/dev/null; }
 	@tmp=$$(mktemp -d) && python3 lib/outputs.py sample "$$tmp" && \
 	  { diff -r "$$tmp" examples || { echo "examples/ is stale: run make examples"; rm -rf "$$tmp"; exit 1; }; } && rm -rf "$$tmp"
-	@echo "test: ok — both dry runs rendered every document, examples/ is current"
+	@echo "test: ok — the dry runs rendered every document, the security group only when asked for, examples/ is current"
 
 clean: ## Remove local caches
 	rm -rf lib/__pycache__
