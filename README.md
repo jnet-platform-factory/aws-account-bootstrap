@@ -14,8 +14,8 @@ make check PROFILE=dev           # read-only policy checks
 ```
 
 The first run asks for your GitHub organisation, repositories, environments and
-regions, and offers to save the answers to `bootstrap.env`; after that it only needs
-the environments. `PROFILE` is an aws-vault profile — leave it out to use the
+regions, and offers to save the answers to `bootstrap.env`; every later run asks again,
+with the saved answers as defaults, so Enter confirms each one. `PROFILE` is an aws-vault profile — leave it out to use the
 credentials you already have.
 
 ## What it creates
@@ -216,9 +216,12 @@ put it in a dedicated deployment account.
 `CONFIG=path` points every target at another config file — one per organisation, for
 example. The scripts run directly too: `./bootstrap-account.sh --help`.
 
-**Anything missing is asked for** when you run interactively, with a sensible default
-where there is one (your organisation is guessed from the git remote of the directory
-you run it in). Answers can be saved to the config file; environments and the security
+**Everything is asked for** when you run interactively, even what `bootstrap.env`
+already says: its value is the default in `[brackets]`, so Enter confirms it and
+anything else replaces it for this run (`-` clears an optional one, such as
+`APP_REPOS`). Without a saved value there is a sensible default where one exists (your
+organisation is guessed from the git remote of the directory you run it in). A value
+set in the environment, or environments given as arguments, is not asked for. Answers can be saved to the config file; environments and the security
 group are never saved, because they differ per account. With `--yes` (`YES=1`), or with no terminal — CI —
 nothing is asked, and a missing required value is an error.
 
@@ -281,8 +284,8 @@ Save these answers to ./bootstrap.env? [Y/n] y
   saved
 ```
 
-From then on only the environment is needed. `apply` shows the same plan, without the
-documents, and asks before changing anything:
+From then on each question shows the saved answer, and Enter keeps it. `apply` shows
+the same plan, without the documents, and asks before changing anything:
 
 ```
 $ make apply PROFILE=dev ENV=dev
@@ -352,9 +355,9 @@ permissions policy prints `new default version` only when its JSON actually chan
 - **The lists replace, they do not add.** Each trust policy is rebuilt from the current
   `PLATFORM_REPOS` / `APP_REPOS` and environments. Give the full list every time: a run
   with only the new repository locks out all the others.
-- **Change `bootstrap.env`, not the prompt.** A value in the config file is never asked
-  for again, and the script never rewrites an existing config file — it prints the
-  lines to add instead. For one run, an environment variable wins over the file:
+- **Change `bootstrap.env` to change the default.** An answer that differs from the
+  file applies to that run only: the script never rewrites an existing config file —
+  it prints the lines to set instead. For one run, an environment variable wins over the file:
   `APP_REPOS="api-service worker-service billing-service" make plan PROFILE=dev ENV=dev`.
 - **Pass the environments every run.** They are never saved, because they differ per
   account. To allow several, list them all: `ENV="dev preview"`.
@@ -481,6 +484,7 @@ roles' job.
 | `Reads`                             | Certificates for custom domains, VPC lookups for VPC-attached functions, secrets for `{{resolve:secretsmanager:…}}`, KMS for encrypted resources, ECR image pulls |
 | `FunctionRoles`                     | Create and manage the roles SAM generates for each function                                                                                                       |
 | `PassRoleToAppServices`             | `iam:PassRole` only to Lambda, API Gateway, EventBridge, Scheduler, Firehose                                                                                      |
+| `MacroTransforms`                   | `cloudformation:CreateChangeSet` on AWS's own transforms (`aws:transform/*`). A SAM template is `Transform: AWS::Serverless-2016-10-31`, and with `--role-arn` CloudFormation runs that transform as this role; without it every SAM deploy fails at the changeset |
 | `ServiceLinkedRoles`                | Only API Gateway's                                                                                                                                                |
 | `DenyAttachingBroadManagedPolicies` | **Deny** attaching `AdministratorAccess`, `PowerUserAccess` or `IAMFullAccess` to any role                                                                        |
 

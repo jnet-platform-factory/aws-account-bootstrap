@@ -123,6 +123,9 @@ if (( WITH_APPS )); then
   expect app-exec implicitDeny rds:CreateDBInstance   "" "${here}"
   expect app-exec implicitDeny ec2:RunInstances       "" "${here}"
   expect app-exec allowed      ec2:DescribeSubnets    "" "${here}"
+  # Not simulated: MacroTransforms (CreateChangeSet on aws:transform/*). The
+  # simulator cannot evaluate a transform ARN - even Allow on "*" comes back
+  # implicitDeny - so a case here would only ever report a false failure.
 fi
 
 echo
