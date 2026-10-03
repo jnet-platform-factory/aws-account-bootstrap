@@ -41,7 +41,7 @@ There are five permission sets, defined in
 | --------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `AdministratorAccess` | `AdministratorAccess`              | —                                                                                                                                                              | 1 hour  |
 | `PlatformOpsAccess`   | `PowerUserAccess`, `IAMFullAccess` | **Deny** access keys and console passwords, changes to the Identity Center and `OrganizationAccountAccessRole` roles, stopping CloudTrail, long-term purchases | 8 hours |
-| `DeveloperFullAccess` | `PowerUserAccess`                  | IAM read; `PassRole` for any role but the privileged ones; **deny** the privileged roles, Identity Center changes, turning off security tooling, long-term purchases | 8 hours |
+| `DeveloperFullAccess` | `PowerUserAccess`                  | IAM read; `PassRole` for any role but the privileged ones; **deny** the privileged roles, Identity Center changes, turning off security tooling, billing changes, long-term purchases | 8 hours |
 | `DeveloperReadOnly`   | `ReadOnlyAccess`                   | **Deny** reading secret values                                                                                                                                 | 8 hours |
 | `BillingManagement`   | `job-function/Billing`             | Read-only view of the organization's accounts and OUs                                                                                                          | 8 hours |
 
@@ -68,8 +68,9 @@ role. Console wizards that offer to "create a new role" fail the same way — pi
 existing one.
 
 It also cannot create or change an IAM Identity Center instance, or stop or weaken CloudTrail,
-GuardDuty, Security Hub, AWS Config or IAM Access Analyzer. "Long-term purchases" here
-also include registering or transferring a domain.
+GuardDuty, Security Hub, AWS Config or IAM Access Analyzer, or change billing, payment
+methods or tax settings — Cost Explorer, budgets and invoices stay readable. "Long-term
+purchases" here also include registering or transferring a domain.
 
 ### Creating them
 
