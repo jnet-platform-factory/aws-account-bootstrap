@@ -1,6 +1,7 @@
 {
-  "description": "Platform team: runs the infrastructure Terraform manages.",
+  "description": "Platform team: runs the infrastructure Terraform manages, and bootstraps the deploy roles.",
   "assignments": [
+    { "account": "Dev", "permissionSet": "PlatformOps" },
     { "account": "Production", "permissionSet": "PlatformOps" }
   ]
 }

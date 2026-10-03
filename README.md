@@ -60,7 +60,7 @@ with:
 | Group        | Dev                   | Production          | Management (OU)       |
 | ------------ | --------------------- | ------------------- | --------------------- |
 | `Developers` | `DeveloperFullAccess` | `DeveloperReadOnly` | —                     |
-| `Platform`   | —                     | `PlatformOps`       | —                     |
+| `Platform`   | `PlatformOps`         | `PlatformOps`       | —                     |
 | `Admins`     | —                     | —                   | `AdministratorAccess` |
 | `Billing`    | —                     | —                   | `BillingManagement`   |
 
@@ -144,7 +144,9 @@ Redshift, OpenSearch, DynamoDB), Shield Advanced and Marketplace subscriptions �
 commits the company to a bill for a year or more. `AdministratorAccess` can still make
 them.
 
-`PlatformOps` is for running production, networking included: VPCs, subnets,
+`PlatformOps` is the platform team's role in dev and production alike: it is what Terraform runs as
+from a laptop, and what `make apply` runs as, since `DeveloperFullAccess` can only read IAM. It is for
+running production, networking included: VPCs, subnets,
 routes, NAT and transit gateways, VPN, Direct Connect, DNS, and IAM. What it cannot do is
 the irreversible or the out-of-band: create access keys or console passwords, change the
 roles Identity Center and AWS Organizations sign in through, turn off the security tooling,
