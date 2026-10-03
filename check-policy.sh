@@ -107,6 +107,11 @@ if (( WITH_APPS )); then
   expect app allowed      lambda:InvokeFunction "arn:aws:lambda:${regions[0]}:${ACCOUNT_ID}:function:my-fn" "${here}"
   expect app implicitDeny iam:CreateRole
   expect app explicitDeny cloudformation:CreateChangeSet "${STACK}" "${elsewhere}"
+  # A post-deploy e2e run reads its stack's API key value - and nothing else
+  # in API Gateway, and never writes it.
+  expect app allowed      apigateway:GET      "arn:aws:apigateway:${regions[0]}::/apikeys/abc123" "${here}"
+  expect app implicitDeny apigateway:GET      "arn:aws:apigateway:${regions[0]}::/restapis/abc123" "${here}"
+  expect app implicitDeny apigateway:DELETE   "arn:aws:apigateway:${regions[0]}::/apikeys/abc123" "${here}"
 
   echo "== App execution (CloudFormation)"
   expect app-exec allowed      lambda:CreateFunction  "" "${here}"

@@ -126,6 +126,12 @@
         "arn:aws:lambda:*:{{ACCOUNT_ID}}:function:*",
         "arn:aws:logs:*:{{ACCOUNT_ID}}:log-group:*"
       ]
+    },
+    {
+      "Sid": "ReadStackApiKeys",
+      "Effect": "Allow",
+      "Action": "apigateway:GET",
+      "Resource": "arn:aws:apigateway:*::/apikeys/*"
     }
   ]
 }
