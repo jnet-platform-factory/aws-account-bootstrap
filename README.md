@@ -736,6 +736,7 @@ roles' job.
 | `PushFunctionImages`        | Push container images for `PackageType: Image` functions                              |
 | `ResolveTemplateParameters` | Read SSM parameters referenced by `AWS::SSM::Parameter::Value` template parameters    |
 | `PostDeploySteps`           | Invoke functions and read their logs — smoke tests, migration runners                 |
+| `ReadStackApiKeys`          | Read API key values (`GET /apikeys/*` only) — post-deploy e2e runs                    |
 
 ### App execution ([`app-cfn-exec-policy.json`](policies/app-cfn-exec-policy.json))
 
