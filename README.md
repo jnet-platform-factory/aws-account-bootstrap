@@ -2,23 +2,27 @@
 
 Keyless, scoped deploy roles for an AWS account — one for your **platform**
 (Terraform), one for your **applications** (SAM / CloudFormation) — created by the one
-script that has to exist before either tool can run.
+script that has to exist before either tool can run. It also creates each repository's
+GitHub environments and sets the variables its workflows need to assume those roles,
+and writes a Terragrunt `root.hcl` and GitHub Actions workflows, filled in for your
+accounts, to copy into those repositories.
 
 ```bash
 make plan  PROFILE=dev           # asks for anything it needs, then shows what would change
-make apply PROFILE=dev ENV=dev   # create / update the roles
+make apply PROFILE=dev ENV=dev   # create / update the roles and the GitHub environments
 make check PROFILE=dev           # read-only policy checks
 ```
 
 The first run asks for your GitHub organisation, repositories, environments and
-regions, and offers to save the answers to `bootstrap.env`; after that it only needs
-the environments. `PROFILE` is an aws-vault profile — leave it out to use the
+regions, and offers to save the answers to `bootstrap.env`; every later run asks again,
+with the saved answers as defaults, so Enter confirms each one. `PROFILE` is an aws-vault profile — leave it out to use the
 credentials you already have.
 
 ## What it creates
 
-In the account your credentials belong to. Nothing else — no VPC, no security group,
-no bucket, no function.
+In the account your credentials belong to, and in the GitHub environments that deploy
+to it — and, only if you answer yes, one security group. Nothing else — no VPC, no
+subnet, no bucket, no function.
 
 ```
                           ┌─────────────────────────────┐
@@ -39,14 +43,92 @@ no bucket, no function.
 | **App execution** role      | `app-cfn-exec-role`                   | `cloudformation.amazonaws.com`, this account only       | `app-cfn-exec-policy` — the resources your application templates declare                                                                             |
 | Test Lambda role (optional) | `lambda-test-role`                    | `lambda.amazonaws.com`, this account only               | `AWSLambdaBasicExecutionRole` — write logs, nothing else                                                                                             |
 
+| Security group (optional)   | `app-default-sg`                      | VPC-attached functions, via their `VpcConfig`           | All egress, no ingress. Published to SSM with the VPC's subnets — see below                                                                          |
+
 The app roles are skipped when `APP_REPOS` is empty, the test role when
-`LAMBDA_ROLE_NAME` is empty. Everything is tagged `ManagedBy=aws-account-bootstrap`.
+`LAMBDA_ROLE_NAME` is empty.
+
+**The security group is asked for on every run**, per account, as the environments
+are: whether to create one (`SECURITY_GROUP=yes`), and in which VPC
+(`SECURITY_GROUP_VPC_ID`, default: the default VPC of the first allowed region). The
+group is created with no ingress rule and the default allow-all egress rule, so it
+restricts nothing. Two SSM parameters, in that region, are what a template's
+`VpcConfig` reads:
+
+| Parameter                        | Type         | Value                                         |
+| -------------------------------- | ------------ | --------------------------------------------- |
+| `/default/vpc/security_group_id` | `String`     | The group's id                                |
+| `/default/vpc/subnet_ids`        | `StringList` | The VPC's private subnets, read on each run   |
+
+```yaml
+SubnetIds:       { Type: "AWS::SSM::Parameter::Value<List<String>>", Default: /default/vpc/subnet_ids }
+SecurityGroupId: { Type: "AWS::SSM::Parameter::Value<String>",       Default: /default/vpc/security_group_id }
+```
+
+**Private** means the subnet's route table has no route to an internet gateway. A VPC
+with none — the default VPC — has all of its subnets published instead, and the plan
+says so: those functions reach AWS services but not the internet.
+
+Both are tagged `ManagedBy=aws-account-bootstrap` and kept current on re-runs — a
+subnet added to the VPC is picked up next time. One that exists **without** that tag
+was written by something else and is left alone, with a warning. `VPC_SSM_PREFIX`
+changes the `/default/vpc` prefix. Everything is tagged `ManagedBy=aws-account-bootstrap`.
 
 **Each deploy role ends up with exactly one managed policy.** If a role already exists
 with `AdministratorAccess`, `PowerUserAccess` or anything else attached, the plan lists
 each as `DETACH`; they are removed after the scoped policy is attached, so the role is
 never left with nothing. Any one of them left in place would silently re-grant what the
 scoped policy leaves out. Inline policies are reported, never deleted.
+
+### In GitHub
+
+For every repository and environment a trust policy names, the environment is created
+if it does not exist, and these
+[environment variables](https://docs.github.com/actions/learn-github-actions/variables)
+are set:
+
+| Variable                | Set in                                     | Value                                 |
+| ----------------------- | ------------------------------------------ | ------------------------------------- |
+| `AWS_ACCOUNT_ID`        | every environment                          | This account                          |
+| `AWS_REGION`            | every environment                          | The first of `ALLOWED_REGIONS`        |
+| `AWS_PLATFORM_ROLE_ARN` | `PLATFORM_REPOS` × `PLATFORM_ENVIRONMENTS` | `platform-deploy-role`                |
+| `AWS_APP_ROLE_ARN`      | `APP_REPOS` × `APP_ENVIRONMENTS`           | `app-deploy-role`                     |
+| `AWS_CFN_EXEC_ROLE_ARN` | `APP_REPOS` × `APP_ENVIRONMENTS`           | `app-cfn-exec-role`, for `--role-arn` |
+
+A repository in both lists gets both role ARNs, so its Terraform and SAM jobs each
+assume their own role. A workflow uses them like this:
+
+```yaml
+jobs:
+  deploy:
+    environment: dev                 # required: the trust policy matches on it
+    permissions: { id-token: write, contents: read }
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_APP_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: sam deploy --role-arn "${{ vars.AWS_CFN_EXEC_ROLE_ARN }}" …
+```
+
+**Protection rules are never set or changed** — that is a decision per environment
+(who approves a production deploy, which branches may), so make it in the repository's
+_Settings → Environments_. The plan shows each environment's rules and flags the ones
+that have none. Other variables are left alone, with one exception.
+
+**An existing `AWS_DEPLOY_ROLE_ARN` is replaced only if you say so.** Workflows from
+before this bootstrap often assume whatever that variable names, so replacing it moves
+them onto the new role on their next run, with no change to the workflow. `apply` asks
+for each environment that has one, before its confirmation; a repository in both lists
+picks the platform or the app role. A dry run only notes the question, and an
+unattended run (`YES=1`, or no terminal) always keeps the old value. The other way to
+switch is a pull request that points `role-to-assume` at the new variable.
+
+This needs the [`gh` CLI](https://cli.github.com) signed in as an admin of each
+repository. Without it the GitHub step is skipped and says why; `CONFIGURE_GITHUB=false`
+skips it on purpose. The step also catches a repository that does not exist or whose
+name is spelled differently on GitHub — either would leave a trust policy that never
+matches.
 
 It is safe to re-run: existing resources are kept, trust policies are rewritten, and a
 permissions policy gets a new default version only if its rendered JSON changed.
@@ -61,7 +143,8 @@ token can submit a stack — visible in the stack's event history, reviewable, r
 back — but cannot call `lambda:UpdateFunctionCode` or `iam:CreateRole` directly. It is
 the same split AWS CDK's bootstrap makes between its deploy and execution roles.
 
-It only works if every deploy passes the role. Set it once per project:
+It only works if every deploy passes the role — `--role-arn ${{ vars.AWS_CFN_EXEC_ROLE_ARN }}`
+in the workflow, or once per project:
 
 ```toml
 # samconfig.toml
@@ -83,8 +166,12 @@ nothing can widen itself.
 
 ### What it does not create, and why
 
-- **Security groups.** A security group belongs to a VPC, and your VPCs are created by
-  Terraform, after this runs. A test Lambda outside a VPC needs none.
+- **VPCs and subnets.** Your VPCs are created by Terraform, after this runs. The
+  optional security group only needs a VPC to exist, and the default VPC will do.
+  **A function in the default VPC's subnets has no internet access** — they are public
+  subnets, and Lambda never gives its network interfaces a public IP — so a function
+  that calls anything outside AWS needs private subnets behind a NAT gateway, which
+  this does not create.
 - **Application roles.** The roles your functions run as come from your SAM templates —
   `app-cfn-exec-role` creates them per stack. `lambda-test-role` is for experiments only.
 - **The Terraform state backend.** See [Terraform state](#terraform-state).
@@ -120,17 +207,22 @@ put it in a dedicated deployment account.
 | `make plan [ENV=…] [PROFILE=…]`          | Prints the plan and every rendered policy. Changes nothing. Works without credentials, against a placeholder account |
 | `make apply [ENV=…] [PROFILE=…] [YES=1]` | Creates or updates the roles. Asks for confirmation unless `YES=1`                                                   |
 | `make check [PROFILE=…]`                 | Access Analyzer and IAM simulator checks. Read-only                                                                  |
+| `make outputs`                           | Rebuilds `outputs/` from the accounts already applied. No AWS                                                        |
+| `make examples`                          | Regenerates [`examples/`](examples/): the outputs for two made-up accounts                                           |
 | `make setup`                             | Copies `bootstrap.env.example` to `bootstrap.env`, if you prefer editing to answering                                |
-| `make lint` / `make test`                | shellcheck and JSON checks / plus two dry runs, no AWS needed                                                        |
+| `make lint` / `make test`                | shellcheck and JSON checks / plus four dry runs, no AWS needed                                                       |
 | `make`                                   | Help                                                                                                                 |
 
 `CONFIG=path` points every target at another config file — one per organisation, for
 example. The scripts run directly too: `./bootstrap-account.sh --help`.
 
-**Anything missing is asked for** when you run interactively, with a sensible default
-where there is one (your organisation is guessed from the git remote of the directory
-you run it in). Answers can be saved to the config file; environments are never saved,
-because they differ per account. With `--yes` (`YES=1`), or with no terminal — CI —
+**Everything is asked for** when you run interactively, even what `bootstrap.env`
+already says: its value is the default in `[brackets]`, so Enter confirms it and
+anything else replaces it for this run (`-` clears an optional one, such as
+`APP_REPOS`). Without a saved value there is a sensible default where one exists (your
+organisation is guessed from the git remote of the directory you run it in). A value
+set in the environment, or environments given as arguments, is not asked for. Answers can be saved to the config file; environments and the security
+group are never saved, because they differ per account. With `--yes` (`YES=1`), or with no terminal — CI —
 nothing is asked, and a missing required value is an error.
 
 ### A first run
@@ -170,6 +262,21 @@ Account 123456789012 (my-org-dev)
  Test
   IAM role       lambda-test-role  AWSLambdaBasicExecutionRole, assumable by Lambda in this account
 
+ GitHub
+  my-org/api-service
+    environment dev  CREATE, without protection rules
+      AWS_ACCOUNT_ID         + 123456789012
+      AWS_REGION             + us-east-1
+      AWS_APP_ROLE_ARN       + arn:aws:iam::123456789012:role/app-deploy-role
+      AWS_CFN_EXEC_ROLE_ARN  + arn:aws:iam::123456789012:role/app-cfn-exec-role
+  my-org/infrastructure
+    environment dev  exists, no protection rules: any branch can deploy
+      AWS_ACCOUNT_ID         = 123456789012
+      AWS_REGION             + us-east-1
+      AWS_PLATFORM_ROLE_ARN  + arn:aws:iam::123456789012:role/platform-deploy-role
+      AWS_DEPLOY_ROLE_ARN      GitHubActions-dev: apply asks whether to replace it
+…                                     and worker-service
+
 ── app-exec-permissions.json
 …                                     every rendered policy and trust document follows
 
@@ -177,8 +284,8 @@ Save these answers to ./bootstrap.env? [Y/n] y
   saved
 ```
 
-From then on only the environment is needed. `apply` shows the same plan, without the
-documents, and asks before changing anything:
+From then on each question shows the saved answer, and Enter keeps it. `apply` shows
+the same plan, without the documents, and asks before changing anything:
 
 ```
 $ make apply PROFILE=dev ENV=dev
@@ -194,12 +301,20 @@ Proceed? [y/N] y
   app-deploy-role: created
   lambda-test-role: created
 
+ GitHub
+  my-org/api-service (dev): environment created, set AWS_ACCOUNT_ID AWS_REGION AWS_APP_ROLE_ARN AWS_CFN_EXEC_ROLE_ARN
+  my-org/infrastructure (dev): set AWS_REGION AWS_PLATFORM_ROLE_ARN
+  my-org/worker-service (dev): environment created, set AWS_ACCOUNT_ID AWS_REGION AWS_APP_ROLE_ARN AWS_CFN_EXEC_ROLE_ARN
+
 Done:
   arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com
   arn:aws:iam::123456789012:role/platform-deploy-role
   arn:aws:iam::123456789012:role/app-deploy-role
   arn:aws:iam::123456789012:role/app-cfn-exec-role
   arn:aws:iam::123456789012:role/lambda-test-role
+
+Ready to copy into the repositories:
+  ./outputs/README.md
 ```
 
 ### Re-running: adding a repository or an environment
@@ -224,18 +339,25 @@ Proceed? [y/N] y
   app-deploy-policy: up to date
   app-deploy-role: exists, trust policy rewritten
   lambda-test-role: exists, trust policy rewritten
+
+ GitHub
+  my-org/api-service (dev): up to date
+  my-org/billing-service (dev): environment created, set AWS_ACCOUNT_ID AWS_REGION AWS_APP_ROLE_ARN AWS_CFN_EXEC_ROLE_ARN
+  my-org/infrastructure (dev): up to date
+  my-org/worker-service (dev): up to date
 ```
 
-Only the trust policies changed; the permissions policies were compared and left alone.
+Only the trust policies changed, and the new repository got its environment; the
+permissions policies were compared and left alone.
 A role's trust policy is always rewritten, even when the result is identical, and a
 permissions policy prints `new default version` only when its JSON actually changed.
 
 - **The lists replace, they do not add.** Each trust policy is rebuilt from the current
   `PLATFORM_REPOS` / `APP_REPOS` and environments. Give the full list every time: a run
   with only the new repository locks out all the others.
-- **Change `bootstrap.env`, not the prompt.** A value in the config file is never asked
-  for again, and the script never rewrites an existing config file — it prints the
-  lines to add instead. For one run, an environment variable wins over the file:
+- **Change `bootstrap.env` to change the default.** An answer that differs from the
+  file applies to that run only: the script never rewrites an existing config file —
+  it prints the lines to set instead. For one run, an environment variable wins over the file:
   `APP_REPOS="api-service worker-service billing-service" make plan PROFILE=dev ENV=dev`.
 - **Pass the environments every run.** They are never saved, because they differ per
   account. To allow several, list them all: `ENV="dev preview"`.
@@ -253,6 +375,9 @@ Re-running only ever creates or updates. It does not converge in these cases:
 - **Renaming** a role or policy creates a new one and leaves the old one behind,
   unprotected by the guardrails.
 - **Descriptions, tags and session duration** of an existing role are left as they were.
+- **GitHub variables and environments are never deleted.** A repository dropped from a
+  list keeps its environment and its `AWS_*` variables, which then name a role it can no
+  longer assume. Remove them by hand.
 
 ## Configuration
 
@@ -273,6 +398,12 @@ environment, which wins.
 | `APP_ROLE_NAME` / `APP_POLICY_NAME`           | `app-deploy-role` / `-policy`      |                                                                       |
 | `APP_EXEC_ROLE_NAME` / `APP_EXEC_POLICY_NAME` | `app-cfn-exec-role` / `-policy`    |                                                                       |
 | `LAMBDA_ROLE_NAME`                            | `lambda-test-role`                 | Set to `""` to skip                                                   |
+| `SECURITY_GROUP`                              | asked; `no` without a terminal     | Create the security group in this account. Never saved                |
+| `SECURITY_GROUP_VPC_ID`                       | asked; the default VPC             | The VPC it goes in, in the first allowed region. Never saved          |
+| `SECURITY_GROUP_NAME`                         | `app-default-sg`                   |                                                                       |
+| `VPC_SSM_PREFIX`                              | `/default/vpc`                     | Prefix for `subnet_ids` and `security_group_id`. `""` to skip         |
+| `CONFIGURE_GITHUB`                            | `true`                             | Create the GitHub environments and set their variables (needs `gh`)   |
+| `OUTPUTS_DIR`                                 | `./outputs`                        | Where apply records accounts and writes the files to copy             |
 | `BOOTSTRAP_ENV`                               | `./bootstrap.env`                  | Alternative config file                                               |
 
 `REPOS`, `ROLE_NAME` and `POLICY_NAME` from earlier versions still work as the platform
@@ -353,6 +484,7 @@ roles' job.
 | `Reads`                             | Certificates for custom domains, VPC lookups for VPC-attached functions, secrets for `{{resolve:secretsmanager:…}}`, KMS for encrypted resources, ECR image pulls |
 | `FunctionRoles`                     | Create and manage the roles SAM generates for each function                                                                                                       |
 | `PassRoleToAppServices`             | `iam:PassRole` only to Lambda, API Gateway, EventBridge, Scheduler, Firehose                                                                                      |
+| `MacroTransforms`                   | `cloudformation:CreateChangeSet` on AWS's own transforms (`aws:transform/*`). A SAM template is `Transform: AWS::Serverless-2016-10-31`, and with `--role-arn` CloudFormation runs that transform as this role; without it every SAM deploy fails at the changeset |
 | `ServiceLinkedRoles`                | Only API Gateway's                                                                                                                                                |
 | `DenyAttachingBroadManagedPolicies` | **Deny** attaching `AdministratorAccess`, `PowerUserAccess` or `IAMFullAccess` to any role                                                                        |
 
@@ -440,24 +572,51 @@ hosted zone, or launch instances.
 analyzer does not evaluate deny statements. The simulator accepts at most 2000
 characters per document, so each policy is split into chunks first.
 
-## Using the roles from GitHub Actions
+## Using the roles: the outputs
 
-```yaml
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    environment: dev # required — the trust policy matches on it
-    permissions:
-      id-token: write # lets the job request an OIDC token
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/app-deploy-role # or platform-deploy-role
-          aws-region: us-east-1
-      - run: sam build && sam deploy --no-confirm-changeset # role_arn comes from samconfig.toml
+Every `apply` records the account it ran in under `outputs/accounts/` (git-ignored) and
+renders, from **every account recorded so far**, files ready to copy into your
+repositories. Apply in the dev account, then in the production account, and the files
+cover both. [`examples/`](examples/) shows them for two made-up accounts.
+
+| File                                                                      | Copy to                                                    |
+| ------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| [`terragrunt/live/root.hcl`](examples/terragrunt/live/root.hcl)           | `infrastructure/live/root.hcl` in each platform repository |
+| [`github-actions/terragrunt.yml`](examples/github-actions/terragrunt.yml) | `.github/workflows/` in each platform repository           |
+| [`github-actions/sam-deploy.yml`](examples/github-actions/sam-deploy.yml) | `.github/workflows/` in each app repository                |
+| [`README.md`](examples/README.md)                                         | — the accounts, and what to do before the first deploy     |
+
+**`root.hcl`: the directory picks the account.** Units live at
+`infrastructure/live/<env>/<region>/<component>/`, the layout platform-infrastructure
+uses, and `root.hcl` maps each environment to its account, region, state bucket and
+local profile. Switching between dev and production is `cd`:
+
+```bash
+aws sso login --profile dev
+cd infrastructure/live/dev/us-east-1/vpc && terragrunt plan          # dev account
+cd ../../../production/us-east-1/vpc     && terragrunt plan          # production account
 ```
+
+Unlike platform-infrastructure's root config there is no hub: no shared-services role
+in the middle, no `assume_role` in the provider. On your machine each environment uses
+its own profile (exported credentials, as from `aws-vault exec`, win); in GitHub
+Actions the job has already assumed `AWS_PLATFORM_ROLE_ARN` for the environment it runs
+in. Either way `allowed_account_ids` makes a run with the wrong credentials fail before
+it changes anything, and an environment missing from the map fails on the first line.
+Each account keeps its state in its own bucket, `<org>-tfstate-<account>`, so no
+cross-account bucket policy is needed.
+
+The local profile recorded for an account is `PROFILE` (or the aws-vault or
+`AWS_PROFILE` profile the run used), falling back to the environment's name.
+
+**The workflows** run each job in the GitHub environment of the same name, which is
+what the trust policy matches on and where the role ARNs and region come from:
+
+- `terragrunt.yml` plans dev on a pull request, applies dev on a push to `main`, and
+  plans or applies any environment from _Run workflow_ — in
+  `infrastructure/live/<env>/`, so the directory and the role always agree.
+- `sam-deploy.yml` deploys dev on a push to `main`, and any environment from _Run
+  workflow_, as the stack `<repository>-<env>`, always passing `AWS_CFN_EXEC_ROLE_ARN`.
 
 Before adding an environment to an account's trust policy, review its protection rules:
 anyone who can run a job in that environment, in any listed repository, gets that role
