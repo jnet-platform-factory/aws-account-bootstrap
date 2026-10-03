@@ -22,19 +22,91 @@
         "iam:Attach*",
         "iam:Detach*",
         "iam:Tag*",
-        "iam:Untag*"
+        "iam:Untag*",
+        "iam:SetDefaultPolicyVersion"
       ],
       "Resource": [
         "arn:aws:iam::*:role/aws-reserved/sso.amazonaws.com/*",
-        "arn:aws:iam::*:role/OrganizationAccountAccessRole"
+        "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+        "arn:aws:iam::*:role/stacksets-exec-*"
       ]
     },
     {
-      "Sid": "DenyStoppingTheAuditTrail",
+      "Sid": "DenyIdentityCenterChanges",
+      "Effect": "Deny",
+      "Action": [
+        "sso:Create*",
+        "sso:Delete*",
+        "sso:Put*",
+        "sso:Update*",
+        "sso:Attach*",
+        "sso:Detach*",
+        "sso:Associate*",
+        "sso:Disassociate*",
+        "sso:Provision*",
+        "sso:Import*",
+        "sso-directory:*",
+        "identitystore:Create*",
+        "identitystore:Delete*",
+        "identitystore:Update*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyDisablingSecurityTooling",
       "Effect": "Deny",
       "Action": [
         "cloudtrail:StopLogging",
-        "cloudtrail:DeleteTrail"
+        "cloudtrail:DeleteTrail",
+        "cloudtrail:UpdateTrail",
+        "cloudtrail:PutEventSelectors",
+        "guardduty:DeleteDetector",
+        "guardduty:UpdateDetector",
+        "guardduty:Disassociate*",
+        "securityhub:DisableSecurityHub",
+        "securityhub:Disassociate*",
+        "config:StopConfigurationRecorder",
+        "config:DeleteConfigurationRecorder",
+        "config:DeleteDeliveryChannel",
+        "access-analyzer:DeleteAnalyzer",
+        "ec2:DeleteFlowLogs"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyDestroyingBackups",
+      "Effect": "Deny",
+      "Action": [
+        "backup:DeleteBackupVault",
+        "backup:DeleteBackupVaultLockConfiguration",
+        "backup:DeleteRecoveryPoint",
+        "backup:UpdateRecoveryPointLifecycle",
+        "rds:DeleteDBSnapshot",
+        "rds:DeleteDBClusterSnapshot",
+        "rds:DeleteDBInstanceAutomatedBackup",
+        "rds:DeleteDBClusterAutomatedBackup",
+        "dynamodb:DeleteBackup",
+        "kms:ScheduleKeyDeletion"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyBillingAndPaymentChanges",
+      "Effect": "Deny",
+      "Action": [
+        "aws-portal:Modify*",
+        "billing:Put*",
+        "billing:Redeem*",
+        "billing:Update*",
+        "cur:Put*",
+        "invoicing:Put*",
+        "payments:Create*",
+        "payments:Delete*",
+        "payments:Make*",
+        "payments:Update*",
+        "tax:BatchPut*",
+        "tax:Delete*",
+        "tax:Put*"
       ],
       "Resource": "*"
     },
@@ -52,7 +124,10 @@
         "es:PurchaseReservedInstanceOffering",
         "dynamodb:PurchaseReservedCapacityOfferings",
         "shield:CreateSubscription",
-        "aws-marketplace:Subscribe"
+        "aws-marketplace:Subscribe",
+        "route53domains:RegisterDomain",
+        "route53domains:TransferDomain",
+        "route53domains:TransferDomainToAnotherAwsAccount"
       ],
       "Resource": "*"
     }

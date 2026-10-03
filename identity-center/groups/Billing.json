@@ -1,0 +1,6 @@
+{
+  "description": "Finance: billing, payments, budgets and cost reports.",
+  "assignments": [
+    { "account": "Management", "permissionSet": "BillingManagement" }
+  ]
+}
