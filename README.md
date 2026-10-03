@@ -8,7 +8,70 @@ and writes a Terragrunt `root.hcl` and GitHub Actions workflows, filled in for y
 accounts, to copy into those repositories. And, in the organization's management
 account, the IAM Identity Center permission sets people sign in with.
 
-Two steps, in this order:
+## Before you start: accounts and organizational units
+
+The account is the boundary everything here relies on: a deploy role, a permission set
+and a leaked credential each reach one account and no further. So the organization
+needs **at least three accounts**, and dev and production are never the same one:
+
+| Account        | Holds                                                        | Workloads   |
+| -------------- | ------------------------------------------------------------ | ----------- |
+| **Management** | AWS Organizations, IAM Identity Center, consolidated billing | None — ever |
+| **dev**        | Everything developers build and break                        | Yes         |
+| **production** | What customers use                                           | Yes         |
+
+Staging, a shared-services or a network account are added the same way when you need
+them; dev and production are the minimum. Each workload account is bootstrapped on its
+own (step 2) and maps to the GitHub environment of the same name, so a `production`
+deploy can only ever reach the production account.
+
+Group the accounts in **organizational units**, so that a Service Control Policy is
+attached once per kind of account rather than once per account:
+
+```
+Root
+├── management account          stays at the root — SCPs never apply to it
+├── Security       (optional)   log archive, audit
+├── Infrastructure (optional)   shared services, network
+└── Workloads
+    ├── NonProd                 dev, staging
+    └── Prod                    production
+```
+
+Keeping NonProd and Prod apart is what lets production get the stricter rules — an SCP
+that pins regions or blocks deleting backups — without slowing dev down. The OU also
+says who signs in where. IAM Identity Center assigns permission sets per account, not per
+OU, so a new account in an OU gets the same assignments as the others there:
+
+| Who        | dev (NonProd)         | production (Prod)     | management            |
+| ---------- | --------------------- | --------------------- | --------------------- |
+| Developers | `DeveloperFullAccess` | `DeveloperReadOnly`   | —                     |
+| Platform   | `PlatformOpsAccess`   | `PlatformOpsAccess`   | —                     |
+| Admins     | `AdministratorAccess` | `AdministratorAccess` | `AdministratorAccess` |
+| Finance    | —                     | —                     | `BillingManagement`   |
+
+This repository creates neither accounts nor OUs nor SCPs. Make them once, in the
+management account, in **AWS Organizations → AWS accounts**, or with the CLI:
+
+```bash
+ROOT=$(aws organizations list-roots --query 'Roots[0].Id' --output text)
+WORKLOADS=$(aws organizations create-organizational-unit --parent-id "$ROOT" --name Workloads \
+              --query 'OrganizationalUnit.Id' --output text)
+NONPROD=$(aws organizations create-organizational-unit --parent-id "$WORKLOADS" --name NonProd \
+            --query 'OrganizationalUnit.Id' --output text)
+PROD=$(aws organizations create-organizational-unit --parent-id "$WORKLOADS" --name Prod \
+         --query 'OrganizationalUnit.Id' --output text)
+
+# A new account (its email must be unused by any other AWS account), then move it into its OU
+aws organizations create-account --account-name dev --email aws-dev@example.com
+aws organizations move-account --account-id 111111111111 --source-parent-id "$ROOT" \
+  --destination-parent-id "$NONPROD"
+```
+
+`create-account` returns a request id; `aws organizations describe-create-account-status`
+gives the account id once it is ready. An existing account is only moved.
+
+Then two steps, in this order:
 
 ```bash
 # 1. Once, in the management account: the permission sets everyone signs in with
@@ -37,13 +100,13 @@ and everything after this section is about the other accounts.
 There are five permission sets, defined in
 [`identity-center/permission-sets.json`](identity-center/permission-sets.json):
 
-| Permission set        | AWS managed policies               | Inline policy ([`identity-center/policies/`](identity-center/policies/))                                                                                       | Session |
-| --------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `AdministratorAccess` | `AdministratorAccess`              | —                                                                                                                                                              | 1 hour  |
-| `PlatformOpsAccess`   | `PowerUserAccess`, `IAMFullAccess` | **Deny** access keys and console passwords, changes to the Identity Center and `OrganizationAccountAccessRole` roles, stopping CloudTrail, long-term purchases | 8 hours |
+| Permission set        | AWS managed policies               | Inline policy ([`identity-center/policies/`](identity-center/policies/))                                                                                                              | Session |
+| --------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `AdministratorAccess` | `AdministratorAccess`              | —                                                                                                                                                                                     | 1 hour  |
+| `PlatformOpsAccess`   | `PowerUserAccess`, `IAMFullAccess` | **Deny** access keys and console passwords, changes to the Identity Center and `OrganizationAccountAccessRole` roles, stopping CloudTrail, long-term purchases                        | 8 hours |
 | `DeveloperFullAccess` | `PowerUserAccess`                  | IAM read; `PassRole` for any role but the privileged ones; **deny** the privileged roles, Identity Center changes, turning off security tooling, billing changes, long-term purchases | 8 hours |
-| `DeveloperReadOnly`   | `ReadOnlyAccess`                   | **Deny** reading secret values                                                                                                                                 | 8 hours |
-| `BillingManagement`   | `job-function/Billing`             | Read-only view of the organization's accounts and OUs                                                                                                          | 8 hours |
+| `DeveloperReadOnly`   | `ReadOnlyAccess`                   | **Deny** reading secret values                                                                                                                                                        | 8 hours |
+| `BillingManagement`   | `job-function/Billing`             | Read-only view of the organization's accounts and OUs                                                                                                                                 | 8 hours |
 
 "Long-term purchases" are Savings Plans, reserved capacity (EC2, RDS, ElastiCache,
 Redshift, OpenSearch, DynamoDB), Shield Advanced and Marketplace subscriptions — each
@@ -130,7 +193,7 @@ subnet, no bucket, no function.
 | **App execution** role      | `app-cfn-exec-role`                   | `cloudformation.amazonaws.com`, this account only       | `app-cfn-exec-policy` — the resources your application templates declare                                                                             |
 | Test Lambda role (optional) | `lambda-test-role`                    | `lambda.amazonaws.com`, this account only               | `AWSLambdaBasicExecutionRole` — write logs, nothing else                                                                                             |
 
-| Security group (optional)   | `app-default-sg`                      | VPC-attached functions, via their `VpcConfig`           | All egress, no ingress. Published to SSM with the VPC's subnets — see below                                                                          |
+| Security group (optional) | `app-default-sg` | VPC-attached functions, via their `VpcConfig` | All egress, no ingress. Published to SSM with the VPC's subnets — see below |
 
 The app roles are skipped when `APP_REPOS` is empty, the test role when
 `LAMBDA_ROLE_NAME` is empty.
@@ -142,14 +205,22 @@ group is created with no ingress rule and the default allow-all egress rule, so 
 restricts nothing. Two SSM parameters, in that region, are what a template's
 `VpcConfig` reads:
 
-| Parameter                        | Type         | Value                                         |
-| -------------------------------- | ------------ | --------------------------------------------- |
-| `/default/vpc/security_group_id` | `String`     | The group's id                                |
-| `/default/vpc/subnet_ids`        | `StringList` | The VPC's private subnets, read on each run   |
+| Parameter                        | Type         | Value                                       |
+| -------------------------------- | ------------ | ------------------------------------------- |
+| `/default/vpc/security_group_id` | `String`     | The group's id                              |
+| `/default/vpc/subnet_ids`        | `StringList` | The VPC's private subnets, read on each run |
 
 ```yaml
-SubnetIds:       { Type: "AWS::SSM::Parameter::Value<List<String>>", Default: /default/vpc/subnet_ids }
-SecurityGroupId: { Type: "AWS::SSM::Parameter::Value<String>",       Default: /default/vpc/security_group_id }
+SubnetIds:
+  {
+    Type: "AWS::SSM::Parameter::Value<List<String>>",
+    Default: /default/vpc/subnet_ids,
+  }
+SecurityGroupId:
+  {
+    Type: "AWS::SSM::Parameter::Value<String>",
+    Default: /default/vpc/security_group_id,
+  }
 ```
 
 **Private** means the subnet's route table has no route to an internet gateway. A VPC
@@ -188,7 +259,7 @@ assume their own role. A workflow uses them like this:
 ```yaml
 jobs:
   deploy:
-    environment: dev                 # required: the trust policy matches on it
+    environment: dev # required: the trust policy matches on it
     permissions: { id-token: write, contents: read }
     steps:
       - uses: aws-actions/configure-aws-credentials@v4
@@ -563,17 +634,17 @@ roles' job.
 
 ### App execution ([`app-cfn-exec-policy.json`](policies/app-cfn-exec-policy.json))
 
-| Statement                           | Effect                                                                                                                                                            |
-| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ServicesAppsUse`                   | `<service>:*` for Lambda, API Gateway, Logs, CloudWatch, SQS, SNS, EventBridge, Scheduler, Firehose, DynamoDB, S3, SES                                            |
-| `Parameters`                        | Create and update SSM parameters                                                                                                                                  |
-| `DnsRecordsOnly`                    | Route 53 **records**, not zones                                                                                                                                   |
-| `Reads`                             | Certificates for custom domains, VPC lookups for VPC-attached functions, secrets for `{{resolve:secretsmanager:…}}`, KMS for encrypted resources, ECR image pulls |
-| `FunctionRoles`                     | Create and manage the roles SAM generates for each function                                                                                                       |
-| `PassRoleToAppServices`             | `iam:PassRole` only to Lambda, API Gateway, EventBridge, Scheduler, Firehose                                                                                      |
+| Statement                           | Effect                                                                                                                                                                                                                                                             |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ServicesAppsUse`                   | `<service>:*` for Lambda, API Gateway, Logs, CloudWatch, SQS, SNS, EventBridge, Scheduler, Firehose, DynamoDB, S3, SES                                                                                                                                             |
+| `Parameters`                        | Create and update SSM parameters                                                                                                                                                                                                                                   |
+| `DnsRecordsOnly`                    | Route 53 **records**, not zones                                                                                                                                                                                                                                    |
+| `Reads`                             | Certificates for custom domains, VPC lookups for VPC-attached functions, secrets for `{{resolve:secretsmanager:…}}`, KMS for encrypted resources, ECR image pulls                                                                                                  |
+| `FunctionRoles`                     | Create and manage the roles SAM generates for each function                                                                                                                                                                                                        |
+| `PassRoleToAppServices`             | `iam:PassRole` only to Lambda, API Gateway, EventBridge, Scheduler, Firehose                                                                                                                                                                                       |
 | `MacroTransforms`                   | `cloudformation:CreateChangeSet` on AWS's own transforms (`aws:transform/*`). A SAM template is `Transform: AWS::Serverless-2016-10-31`, and with `--role-arn` CloudFormation runs that transform as this role; without it every SAM deploy fails at the changeset |
-| `ServiceLinkedRoles`                | Only API Gateway's                                                                                                                                                |
-| `DenyAttachingBroadManagedPolicies` | **Deny** attaching `AdministratorAccess`, `PowerUserAccess` or `IAMFullAccess` to any role                                                                        |
+| `ServiceLinkedRoles`                | Only API Gateway's                                                                                                                                                                                                                                                 |
+| `DenyAttachingBroadManagedPolicies` | **Deny** attaching `AdministratorAccess`, `PowerUserAccess` or `IAMFullAccess` to any role                                                                                                                                                                         |
 
 ### Tailoring the service lists
 
