@@ -18,7 +18,7 @@
     },
     {
       "name": "DeveloperFullAccess",
-      "description": "Developers: every service except IAM, which is read-only. Can pass app-cfn-exec-role to CloudFormation and lambda-test-role to Lambda. No long-term purchases.",
+      "description": "Developers: every service; IAM is read-only. Can pass any role except the organization, platform and deploy roles. Cannot turn off security tooling or change Identity Center. No long-term purchases.",
       "sessionDuration": "PT8H",
       "managedPolicies": ["arn:aws:iam::aws:policy/PowerUserAccess"],
       "inlinePolicy": "policies/DeveloperFullAccess.json"
