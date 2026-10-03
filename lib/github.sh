@@ -70,7 +70,9 @@ github_failed() {  # github_failed <message>
 # them to a new role on their next run. Only the person running apply decides that:
 # asked before the confirmation, never in a dry run or an unattended one.
 github_deploy_role_question() {
-  local name value arns=() roles=() answer choice="" i
+  local name value arns=() roles=() answer choice="" i current="${3##*/}"
+  # Same role name in another account looks like no change; name the account.
+  [[ "$3" != *":${ACCOUNT_ID}:"* ]] && current="${current} in account $(cut -d: -f5 <<<"$3")"
   while IFS=$'\t' read -r name value; do
     case "${name}" in
       AWS_PLATFORM_ROLE_ARN|AWS_APP_ROLE_ARN) arns+=("${value}"); roles+=("${value##*/}") ;;
@@ -83,25 +85,25 @@ github_deploy_role_question() {
     fi
   done
   if (( ${DRY_RUN:-0} )); then
-    printf '      %-22s   %s: apply asks whether to replace it\n' AWS_DEPLOY_ROLE_ARN "${3##*/}"
+    printf '      %-22s   %s: apply asks whether to replace it\n' AWS_DEPLOY_ROLE_ARN "${current}"
     return 0
   fi
   if (( ! INTERACTIVE )); then
-    printf '      %-22s   left as it is (%s): unattended runs never replace it\n' AWS_DEPLOY_ROLE_ARN "${3##*/}"
+    printf '      %-22s   left as it is (%s): unattended runs never replace it\n' AWS_DEPLOY_ROLE_ARN "${current}"
     return 0
   fi
   if (( ${#arns[@]} == 1 )); then
-    read -r -p "      AWS_DEPLOY_ROLE_ARN is ${3##*/}. Replace it with ${roles[0]}? [y/N] " answer
+    read -r -p "      AWS_DEPLOY_ROLE_ARN is ${current}. Replace it with ${roles[0]}? [y/N] " answer
     [[ "${answer}" == [yY]* ]] && choice=0
   else
-    read -r -p "      AWS_DEPLOY_ROLE_ARN is ${3##*/}. Replace it with 1) ${roles[0]}, 2) ${roles[1]}, or keep it? [1/2/N] " answer
+    read -r -p "      AWS_DEPLOY_ROLE_ARN is ${current}. Replace it with 1) ${roles[0]}, 2) ${roles[1]}, or keep it? [1/2/N] " answer
     case "${answer}" in 1) choice=0 ;; 2) choice=1 ;; esac
   fi
   if [[ -n "${choice}" ]]; then
     GITHUB_DEPLOY_ROLE_CHOICES+="$1"$'\t'"$2"$'\t'"${arns[choice]}"$'\n'
     printf '      %-22s ~ %s → %s\n' AWS_DEPLOY_ROLE_ARN "$3" "${arns[choice]}"
   else
-    printf '      %-22s   left as it is (%s)\n' AWS_DEPLOY_ROLE_ARN "${3##*/}"
+    printf '      %-22s   left as it is (%s)\n' AWS_DEPLOY_ROLE_ARN "${current}"
   fi
 }
 
@@ -171,6 +173,9 @@ github_sync() {
           printf '      %-22s + %s\n' "${name}" "${want}"
         else
           printf '      %-22s ~ %s → %s\n' "${name}" "${have}" "${want}"
+          if [[ "${name}" == AWS_ACCOUNT_ID ]]; then
+            echo "      WARNING: ${env} deploys to account ${have} today; apply points it at ${want} instead"
+          fi
         fi
       elif [[ "${have}" != "${want}" ]]; then
         set_names+=("${name}"); set_values+=("${want}")

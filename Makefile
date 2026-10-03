@@ -4,8 +4,8 @@
 #   make apply PROFILE=dev                       create / update the roles
 #   make check PROFILE=dev                       read-only policy checks
 #
-# Anything missing is asked for, and you are offered to save the answers to
-# bootstrap.env — so the first run needs no setup and later runs ask only for ENV.
+# Everything is asked for, and you are offered to save the answers to
+# bootstrap.env — so the first run needs no setup and later runs only confirm.
 #
 # ENV      GitHub environment(s) allowed to deploy into this account, space-separated
 # PROFILE  aws-vault profile to run under; omit to use the credentials you already have
@@ -67,16 +67,16 @@ lint: ## shellcheck the scripts and validate the policy templates
 
 test: lint ## lint, then dry-run with the example config (no AWS needed)
 	@BOOTSTRAP_ENV=$(abspath bootstrap.env.example) CONFIGURE_GITHUB=false AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
-	  ./bootstrap-account.sh --dry-run dev production >/dev/null
+	  ./bootstrap-account.sh --dry-run dev production </dev/null >/dev/null
 	@BOOTSTRAP_ENV=$(abspath bootstrap.env.example) CONFIGURE_GITHUB=false APP_REPOS= LAMBDA_ROLE_NAME= \
 	  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
-	  ./bootstrap-account.sh --dry-run dev >/dev/null
+	  ./bootstrap-account.sh --dry-run dev </dev/null >/dev/null
 	@BOOTSTRAP_ENV=$(abspath bootstrap.env.example) CONFIGURE_GITHUB=false SECURITY_GROUP=yes \
 	  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
-	  ./bootstrap-account.sh --dry-run dev | grep 'Security group app-default-sg' >/dev/null
+	  ./bootstrap-account.sh --dry-run dev </dev/null | grep 'Security group app-default-sg' >/dev/null
 	@BOOTSTRAP_ENV=$(abspath bootstrap.env.example) CONFIGURE_GITHUB=false \
 	  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
-	  ./bootstrap-account.sh --dry-run dev | { ! grep 'Security group' >/dev/null; }
+	  ./bootstrap-account.sh --dry-run dev </dev/null | { ! grep 'Security group' >/dev/null; }
 	@tmp=$$(mktemp -d) && python3 lib/outputs.py sample "$$tmp" && \
 	  { diff -r "$$tmp" examples || { echo "examples/ is stale: run make examples"; rm -rf "$$tmp"; exit 1; }; } && rm -rf "$$tmp"
 	@echo "test: ok — the dry runs rendered every document, the security group only when asked for, examples/ is current"

@@ -35,8 +35,9 @@
 #   --dry-run   print the plan and every policy document; change nothing
 #   --yes       unattended: no questions, no confirmation (for automation)
 #
-# Anything not given as an argument, in the environment or in bootstrap.env is
-# asked for interactively, and you are offered to save the answers.
+# Anything not given as an argument or in the environment is asked for
+# interactively, every run; a value in bootstrap.env is the default, so Enter
+# confirms it. You are offered to save new answers.
 #
 # The environments apply to both roles unless PLATFORM_ENVIRONMENTS or
 # APP_ENVIRONMENTS is set. Configuration: see bootstrap.env.example.
@@ -57,7 +58,7 @@ for arg in "$@"; do
   case "${arg}" in
     --dry-run) DRY_RUN=1 ;;
     --yes|-y)  ASSUME_YES=1; INTERACTIVE=0 ;;   # unattended: never prompt
-    -h|--help) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)        die "unknown option ${arg}" ;;
     *)         env_args+=("${arg}") ;;
   esac
@@ -83,15 +84,19 @@ else
 fi
 export ACCOUNT_ID
 
-# --- Ask for whatever is still missing ---------------------------------------
-if (( INTERACTIVE )) && [[ -z "${GITHUB_ORG:-}" || -z "${PLATFORM_REPOS:-${REPOS:-}}" ]]; then
-  echo "Bootstrapping account ${account_label}. A few questions first (Ctrl-C to stop)."
+# --- Ask, or confirm what the config file says --------------------------------
+if (( INTERACTIVE )); then
+  echo "Bootstrapping account ${account_label}. Enter keeps the value in [brackets] (Ctrl-C to stop)."
   echo
 fi
 ask GITHUB_ORG "GitHub organisation (or user) that owns the repositories" "$(guess_github_org)"
-[[ -z "${PLATFORM_REPOS:-}" && -n "${REPOS:-}" ]] && export PLATFORM_REPOS="${REPOS}"
+if [[ -z "${PLATFORM_REPOS:-}" && -n "${REPOS:-}" ]]; then
+  export PLATFORM_REPOS="${REPOS}"
+  # shellcheck disable=SC2034  # read by ask, so the old name is confirmed too
+  [[ -n "${CONFIG_FILE_REPOS+set}" ]] && CONFIG_FILE_PLATFORM_REPOS="${REPOS}"
+fi
 ask PLATFORM_REPOS "Repositories that run Terraform (space-separated, without the org)"
-ask APP_REPOS "Repositories that deploy SAM / CloudFormation apps (blank: no app roles)" "" optional
+ask APP_REPOS "Repositories that deploy SAM / CloudFormation apps (none: no app roles)" "" optional
 
 if (( ${#env_args[@]} )); then
   : "${PLATFORM_ENVIRONMENTS:=${env_args[*]}}"

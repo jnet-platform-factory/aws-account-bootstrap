@@ -1,20 +1,31 @@
 # shellcheck shell=bash
 # Shared configuration for bootstrap-account.sh and check-policy.sh.
 #
-# Precedence: environment > config file (BOOTSTRAP_ENV, default ./bootstrap.env)
-# > answers to interactive prompts > defaults. Prompts only appear when a
-# required value is still missing and stdin is a terminal.
+# Precedence: environment > answers to interactive prompts > config file
+# (BOOTSTRAP_ENV, default ./bootstrap.env) > defaults. When stdin is a terminal,
+# every question is asked, with the config file's value as its default, so each
+# run confirms what it will use. Only the environment and arguments skip one.
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "${LIB_DIR}")"
 CONFIG_FILE="${BOOTSTRAP_ENV:-${ROOT_DIR}/bootstrap.env}"
 
 if [[ -f "${CONFIG_FILE}" ]]; then
-  # Only fill in what the environment has not already set.
-  while IFS='=' read -r key value; do
+  # Only fill in what the environment has not already set, and remember each
+  # value taken from the file (as CONFIG_FILE_<key>) so ask can confirm it.
+  while IFS='=' read -r key value || [[ -n "${key}" ]]; do   # a last line without a newline counts
     [[ -z "${key}" || "${key}" == \#* ]] && continue
     value="${value%\"}"; value="${value#\"}"
-    [[ -z "${!key:-}" ]] && export "${key}=${value}"
+    # A stray '=' or quote (often a curly one from a word processor) would become
+    # part of a repository or role name.
+    if [[ "${value}" == =* || "${value}" == *[\"\']* || "${value}" == *$'\xe2\x80\x9c'* || "${value}" == *$'\xe2\x80\x9d'* ]]; then
+      echo "error: ${CONFIG_FILE}: ${key} is not KEY=\"value\" with plain double quotes: ${key}=${value}" >&2
+      exit 1
+    fi
+    if [[ -z "${!key:-}" ]]; then
+      export "${key}=${value}"
+      printf -v "CONFIG_FILE_${key}" '%s' "${value}"
+    fi
   done < "${CONFIG_FILE}"
 fi
 
@@ -37,18 +48,30 @@ INTERACTIVE=0; [[ -t 0 ]] && INTERACTIVE=1
 ANSWERED=()   # variables set by a prompt, offered for saving afterwards
 
 # ask <VAR> <question> [default] [optional]
-# Prompts for VAR when it is unset and the session is interactive. A required
-# value with no answer and no default is an error; an optional one may be blank.
+# Prompts for VAR when the session is interactive, unless the environment or an
+# argument already set it. A value from the config file is asked for too, as the
+# default, so it is confirmed every run. A required value with no answer and no
+# default is an error; an optional one may be blank, or '-' to clear a default.
 ask() {
   local var="$1" question="$2" default="${3:-}" optional="${4:-}" answer
-  [[ -n "${!var+set}" && ( -n "${!var}" || -n "${optional}" ) ]] && return 0
+  local file_var="CONFIG_FILE_${var}" from_file=0
+  [[ -n "${!file_var+set}" && "${!var-}" == "${!file_var}" ]] && from_file=1
+  if (( from_file && INTERACTIVE )); then
+    [[ -n "${!var}" ]] && default="${!var}"   # a blank in the file keeps the default
+  elif [[ -n "${!var+set}" && ( -n "${!var}" || -n "${optional}" ) ]]; then
+    return 0
+  fi
   if (( ! INTERACTIVE )); then
     [[ -n "${default}" ]] && { export "${var}=${default}"; return 0; }
     [[ -n "${optional}" ]] && { export "${var}="; return 0; }
     die "${var} is not set (see bootstrap.env.example), and there is no terminal to ask"
   fi
   while :; do
-    if [[ -n "${default}" ]]; then
+    if [[ -n "${default}" && -n "${optional}" ]]; then
+      read -r -p "${question} [${default}, - for none]: " answer
+      answer="${answer:-${default}}"
+      [[ "${answer}" == "-" ]] && answer=""
+    elif [[ -n "${default}" ]]; then
       read -r -p "${question} [${default}]: " answer
       answer="${answer:-${default}}"
     else
@@ -58,18 +81,20 @@ ask() {
     echo "  required"
   done
   export "${var}=${answer}"
+  # Confirming the file's value changes nothing worth saving.
+  (( from_file )) && [[ "${answer}" == "${!file_var}" ]] && return 0
   ANSWERED+=("${var}")
 }
 
-# Offer to write prompted answers to the config file, so the next run asks nothing.
-# Never touches an existing file: it prints the lines to add instead.
+# Offer to write prompted answers to the config file, so the next run offers
+# them as defaults. Never touches an existing file: it prints the lines instead.
 offer_to_save() {
   (( ${#ANSWERED[@]} )) || return 0
   local lines=() var
   for var in "${ANSWERED[@]}"; do lines+=("${var}=\"${!var}\""); done
   echo
   if [[ -f "${CONFIG_FILE}" ]]; then
-    echo "To skip these questions next time, add to ${CONFIG_FILE}:"
+    echo "To make these the defaults next time, set in ${CONFIG_FILE}:"
     printf '  %s\n' "${lines[@]}"
     return 0
   fi
