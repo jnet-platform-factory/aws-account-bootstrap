@@ -89,6 +89,11 @@ change made directly in Organizations shows up as drift, and the OU has to be
 re-registered.
 
 Then two steps, in this order:
+Renaming an OU keeps its id and the SCPs attached to it. In an organization managed by
+**Control Tower**, create, rename and move OUs and accounts in Control Tower instead — a
+change made directly in Organizations shows up as drift, and the OU has to be
+re-registered.
+
 
 ```bash
 # 1. Once, in the management account: the permission sets, groups and assignments everyone signs in with
