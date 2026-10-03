@@ -41,7 +41,7 @@ There are five permission sets, defined in
 | --------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `AdministratorAccess` | `AdministratorAccess`              | —                                                                                                                                                              | 1 hour  |
 | `PlatformOpsAccess`   | `PowerUserAccess`, `IAMFullAccess` | **Deny** access keys and console passwords, changes to the Identity Center and `OrganizationAccountAccessRole` roles, stopping CloudTrail, long-term purchases | 8 hours |
-| `DeveloperFullAccess` | `PowerUserAccess`                  | IAM read; `PassRole` for `app-cfn-exec-role` to CloudFormation and `lambda-test-role` to Lambda; **deny** long-term purchases                                  | 8 hours |
+| `DeveloperFullAccess` | `PowerUserAccess`                  | IAM read; `PassRole` for any role but the privileged ones; **deny** the privileged roles, Identity Center changes, turning off security tooling, long-term purchases | 8 hours |
 | `DeveloperReadOnly`   | `ReadOnlyAccess`                   | **Deny** reading secret values                                                                                                                                 | 8 hours |
 | `BillingManagement`   | `job-function/Billing`             | Read-only view of the organization's accounts and OUs                                                                                                          | 8 hours |
 
@@ -50,11 +50,26 @@ Redshift, OpenSearch, DynamoDB), Shield Advanced and Marketplace subscriptions �
 commits the company to a bill for a year or more. `AdministratorAccess` can still make
 them.
 
-`DeveloperFullAccess` creates nothing in IAM. A SAM deploy from a laptop works the way CI
+`DeveloperFullAccess` is meant for development accounts: every service, but nothing
+written in IAM. Developers can pass any existing role to the services they build on — a
+function's execution role, an ECS task role, a SageMaker or EventBridge role; the services
+are listed under `iam:PassedToService`, add one there if a deploy needs it — except the
+privileged ones, which they can neither pass nor assume: `OrganizationAccountAccessRole`, the
+Identity Center roles, `stacksets-exec-*`, `platform-deploy-role`, `app-deploy-role`, and
+any role named `*terraform*`, `*Terraform*` or `cicd-*`. If your deploy roles have other
+names, add them to [`DeveloperFullAccess.json`](identity-center/policies/DeveloperFullAccess.json).
+Passing a role is using its permissions, so **a role with `AdministratorAccess` that a
+service can assume makes every developer an administrator** — keep none.
+
+New roles come from templates, never by hand. A SAM deploy from a laptop works the way CI
 does: pass `--role-arn` for `app-cfn-exec-role` (or set `role_arn` in `samconfig.toml`)
-and CloudFormation creates the function roles. The role names are the defaults from
-step 2 ([What it creates](#what-it-creates)); if you rename them in `bootstrap.env`,
-change them in [`DeveloperFullAccess.json`](identity-center/policies/DeveloperFullAccess.json) too.
+and CloudFormation creates the function roles; without it, the deploy fails at the first
+role. Console wizards that offer to "create a new role" fail the same way — pick an
+existing one.
+
+It also cannot create or change an IAM Identity Center instance, or stop or weaken CloudTrail,
+GuardDuty, Security Hub, AWS Config or IAM Access Analyzer. "Long-term purchases" here
+also include registering or transferring a domain.
 
 ### Creating them
 
