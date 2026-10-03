@@ -8,7 +8,7 @@
     },
     {
       "name": "PlatformOpsAccess",
-      "description": "Platform team: every service including IAM. No access keys or console passwords, no changes to the Identity Center or organization access roles, no stopping CloudTrail, no long-term purchases.",
+      "description": "Platform team, production operations: every service including IAM and networking. No access keys or console passwords, no changes to the Identity Center or organization access roles, no turning off security tooling, no deleting backups or KMS keys, no billing changes, no long-term purchases.",
       "sessionDuration": "PT8H",
       "managedPolicies": [
         "arn:aws:iam::aws:policy/PowerUserAccess",
@@ -18,7 +18,7 @@
     },
     {
       "name": "DeveloperFullAccess",
-      "description": "Developers: every service; IAM is read-only. Can pass any role except the organization, platform and deploy roles. Cannot turn off security tooling, change Identity Center or change billing. No long-term purchases.",
+      "description": "Developers, dev accounts only: every service; IAM is read-only. No networking changes (VPCs, subnets, routes, gateways, transit gateways, VPN), no large instance, database or cache sizes, no expensive services. Can pass any role except the organization, platform and deploy roles. Cannot turn off security tooling, change Identity Center or change billing. No long-term purchases.",
       "sessionDuration": "PT8H",
       "managedPolicies": ["arn:aws:iam::aws:policy/PowerUserAccess"],
       "inlinePolicy": "policies/DeveloperFullAccess.json"

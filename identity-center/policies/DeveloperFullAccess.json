@@ -71,6 +71,243 @@
       ]
     },
     {
+      "Sid": "DenyNetworkTopology",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:CreateVpc*",
+        "ec2:DeleteVpc*",
+        "ec2:ModifyVpc*",
+        "ec2:AcceptVpc*",
+        "ec2:RejectVpc*",
+        "ec2:AssociateVpc*",
+        "ec2:DisassociateVpc*",
+        "ec2:EnableVpc*",
+        "ec2:DisableVpc*",
+        "ec2:CreateSubnet*",
+        "ec2:DeleteSubnet*",
+        "ec2:ModifySubnet*",
+        "ec2:AssociateSubnet*",
+        "ec2:DisassociateSubnet*",
+        "ec2:CreateRoute*",
+        "ec2:DeleteRoute*",
+        "ec2:ReplaceRoute*",
+        "ec2:AssociateRouteTable",
+        "ec2:DisassociateRouteTable",
+        "ec2:*InternetGateway",
+        "ec2:*NatGateway",
+        "ec2:*NatGatewayAddress",
+        "ec2:AllocateAddress",
+        "ec2:CreateCarrierGateway",
+        "ec2:CreateLocalGateway*",
+        "ec2:CreateTransitGateway*",
+        "ec2:DeleteTransitGateway*",
+        "ec2:ModifyTransitGateway*",
+        "ec2:AcceptTransitGateway*",
+        "ec2:RejectTransitGateway*",
+        "ec2:AssociateTransitGateway*",
+        "ec2:DisassociateTransitGateway*",
+        "ec2:EnableTransitGateway*",
+        "ec2:DisableTransitGateway*",
+        "ec2:ReplaceTransitGateway*",
+        "ec2:RegisterTransitGateway*",
+        "ec2:DeregisterTransitGateway*",
+        "ec2:CreateVpn*",
+        "ec2:DeleteVpn*",
+        "ec2:ModifyVpn*",
+        "ec2:AttachVpnGateway",
+        "ec2:DetachVpnGateway",
+        "ec2:EnableVgwRoutePropagation",
+        "ec2:DisableVgwRoutePropagation",
+        "ec2:CreateCustomerGateway",
+        "ec2:DeleteCustomerGateway",
+        "ec2:CreateClientVpn*",
+        "ec2:DeleteClientVpn*",
+        "ec2:ModifyClientVpn*",
+        "ec2:AssociateClientVpnTargetNetwork",
+        "ec2:CreateNetworkAcl*",
+        "ec2:DeleteNetworkAcl*",
+        "ec2:ReplaceNetworkAcl*",
+        "ec2:CreateDhcpOptions",
+        "ec2:AssociateDhcpOptions",
+        "ec2:DeleteDhcpOptions",
+        "ec2:CreateManagedPrefixList",
+        "ec2:ModifyManagedPrefixList",
+        "ec2:DeleteManagedPrefixList",
+        "ec2:CreateIpam*",
+        "ec2:DeleteIpam*",
+        "ec2:ModifyIpam*",
+        "ec2:AllocateIpamPoolCidr",
+        "ec2:ProvisionIpamPoolCidr",
+        "ec2:CreateTrafficMirror*",
+        "ec2:CreateVerifiedAccess*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyNetworkServices",
+      "Effect": "Deny",
+      "Action": [
+        "directconnect:*",
+        "networkmanager:*",
+        "network-firewall:*",
+        "globalaccelerator:*",
+        "vpc-lattice:Create*",
+        "vpc-lattice:Delete*",
+        "vpc-lattice:Update*",
+        "ram:Create*",
+        "ram:Delete*",
+        "ram:Update*",
+        "ram:Associate*",
+        "ram:Disassociate*",
+        "ram:Accept*",
+        "ram:Reject*",
+        "ram:Enable*",
+        "route53resolver:Create*",
+        "route53resolver:Delete*",
+        "route53resolver:Update*",
+        "route53resolver:Associate*",
+        "route53resolver:Disassociate*",
+        "route53resolver:Put*",
+        "route53:CreateHostedZone",
+        "route53:DeleteHostedZone",
+        "route53:AssociateVPCWithHostedZone",
+        "route53:DisassociateVPCFromHostedZone",
+        "route53:CreateVPCAssociationAuthorization"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyLargeInstances",
+      "Effect": "Deny",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": {
+        "StringNotLike": {
+          "ec2:InstanceType": [
+            "t3.*",
+            "t3a.*",
+            "t4g.*",
+            "*.nano",
+            "*.micro",
+            "*.small",
+            "*.medium",
+            "*.large",
+            "*.xlarge"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyAcceleratedInstances",
+      "Effect": "Deny",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": {
+        "StringLike": {
+          "ec2:InstanceType": [
+            "p*",
+            "g*",
+            "inf*",
+            "trn*",
+            "dl*",
+            "f1.*",
+            "f2.*",
+            "vt1.*",
+            "x*",
+            "u-*",
+            "hpc*",
+            "mac*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyLargeDatabases",
+      "Effect": "Deny",
+      "Action": [
+        "rds:CreateDBInstance",
+        "rds:CreateDBInstanceReadReplica",
+        "rds:ModifyDBInstance",
+        "rds:RestoreDBInstanceFromDBSnapshot",
+        "rds:RestoreDBInstanceFromS3",
+        "rds:RestoreDBInstanceToPointInTime",
+        "rds:CreateDBCluster",
+        "rds:ModifyDBCluster",
+        "rds:RestoreDBClusterFromSnapshot",
+        "rds:RestoreDBClusterToPointInTime"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotLike": {
+          "rds:DatabaseClass": [
+            "db.t3.*",
+            "db.t4g.*",
+            "db.serverless",
+            "db.*.large"
+          ]
+        },
+        "Null": {
+          "rds:DatabaseClass": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyLargeCaches",
+      "Effect": "Deny",
+      "Action": [
+        "elasticache:CreateCacheCluster",
+        "elasticache:CreateReplicationGroup",
+        "elasticache:ModifyCacheCluster",
+        "elasticache:ModifyReplicationGroup"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotLike": {
+          "elasticache:CacheNodeType": [
+            "cache.t3.*",
+            "cache.t4g.*",
+            "cache.*.large"
+          ]
+        },
+        "Null": {
+          "elasticache:CacheNodeType": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyExpensiveServices",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:AllocateHosts",
+        "ec2:CreateCapacityReservation",
+        "lambda:PutProvisionedConcurrencyConfig",
+        "eks:CreateCluster",
+        "elasticmapreduce:RunJobFlow",
+        "kafka:CreateCluster",
+        "kafka:CreateClusterV2",
+        "redshift:CreateCluster",
+        "redshift-serverless:CreateWorkgroup",
+        "es:CreateDomain",
+        "es:CreateElasticsearchDomain",
+        "aoss:CreateCollection",
+        "memorydb:CreateCluster",
+        "docdb-elastic:CreateCluster",
+        "neptune-graph:CreateGraph",
+        "fsx:CreateFileSystem",
+        "kendra:CreateIndex",
+        "workspaces:CreateWorkspaces",
+        "sagemaker:CreateEndpoint",
+        "sagemaker:CreateTrainingJob",
+        "sagemaker:CreateHyperParameterTuningJob",
+        "sagemaker:CreateNotebookInstance",
+        "sagemaker:CreateCluster",
+        "bedrock:CreateProvisionedModelThroughput",
+        "bedrock:CreateModelCustomizationJob",
+        "quicksight:CreateAccountSubscription"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "DenyIdentityCenterChanges",
       "Effect": "Deny",
       "Action": [
@@ -107,7 +344,8 @@
         "config:StopConfigurationRecorder",
         "config:DeleteConfigurationRecorder",
         "config:DeleteDeliveryChannel",
-        "access-analyzer:DeleteAnalyzer"
+        "access-analyzer:DeleteAnalyzer",
+        "ec2:DeleteFlowLogs"
       ],
       "Resource": "*"
     },
