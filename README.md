@@ -33,10 +33,21 @@ Root
 ├── management account          stays at the root — SCPs never apply to it
 ├── Security       (optional)   log archive, audit
 ├── Infrastructure (optional)   shared services, network
+├── Sandbox        (optional)   experiments, no path to production
+├── Suspended      (optional)   closed accounts awaiting deletion — deny-all SCP
 └── Workloads
     ├── NonProd                 dev, staging
     └── Prod                    production
 ```
+
+Every organization uses this same tree, with these same names. OUs are named for the
+environment, never the product: an organization already belongs to one product, so an
+`Acme` OU inside the Acme organization says nothing the organization doesn't,
+and identical names let one set of SCPs, StackSet targets and monitoring templates
+serve every organization. The product goes in the account name (`acme-prod`,
+`acme-dev`) and the `Product` tag. If one organization ever hosts two products that need
+different SCPs, nest the product under the environment — `Workloads/Prod/Payments` — never
+above it; if their SCPs are the same, the tag is enough.
 
 Keeping NonProd and Prod apart is what lets production get the stricter rules — an SCP
 that pins regions or blocks deleting backups — without slowing dev down. The OU also
@@ -72,6 +83,11 @@ aws organizations move-account --account-id 111111111111 --source-parent-id "$RO
 gives the account id once it is ready. An existing account is only moved.
 
 Then two steps, in this order:
+Renaming an OU keeps its id and the SCPs attached to it. In an organization managed by
+**Control Tower**, create, rename and move OUs and accounts in Control Tower instead — a
+change made directly in Organizations shows up as drift, and the OU has to be
+re-registered.
+
 
 ```bash
 # 1. Once, in the management account: the permission sets everyone signs in with
