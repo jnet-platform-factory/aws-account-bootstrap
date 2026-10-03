@@ -33,22 +33,34 @@ Root
 ├── management account          stays at the root — SCPs never apply to it
 ├── Security       (optional)   log archive, audit
 ├── Infrastructure (optional)   shared services, network
+├── Sandbox        (optional)   experiments, no path to production
+├── Suspended      (optional)   closed accounts awaiting deletion — deny-all SCP
 └── Workloads
     ├── NonProd                 dev, staging
     └── Prod                    production
 ```
 
+Every organization uses this same tree, with these same names. OUs are named for the
+environment, never the product: an organization already belongs to one product, so an
+`Acme` OU inside the Acme organization says nothing the organization doesn't,
+and identical names let one set of SCPs, StackSet targets and monitoring templates
+serve every organization. The product goes in the account name (`acme-prod`,
+`acme-dev`) and the `Product` tag. If one organization ever hosts two products that need
+different SCPs, nest the product under the environment — `Workloads/Prod/Payments` — never
+above it; if their SCPs are the same, the tag is enough.
+
 Keeping NonProd and Prod apart is what lets production get the stricter rules — an SCP
 that pins regions or blocks deleting backups — without slowing dev down. The OU also
 says who signs in where. IAM Identity Center assigns permission sets per account, not per
-OU, so give a new account the same assignments as the others in its OU:
+OU, so give a new account the same assignments as the others in its OU — a line in each
+[group file](identity-center/groups/) that names one of them:
 
-| Who        | dev (NonProd)         | production (Prod)     | management            |
-| ---------- | --------------------- | --------------------- | --------------------- |
-| Developers | `DeveloperFullAccess` | `DeveloperReadOnly`   | —                     |
-| Platform   | `PlatformOpsAccess`   | `PlatformOpsAccess`   | —                     |
-| Admins     | `AdministratorAccess` | `AdministratorAccess` | `AdministratorAccess` |
-| Finance    | —                     | —                     | `BillingManagement`   |
+| Group        | Dev                   | Production          | Management            | Shared-Services       |
+| ------------ | --------------------- | ------------------- | --------------------- | --------------------- |
+| `Developers` | `DeveloperFullAccess` | `DeveloperReadOnly` | —                     | —                     |
+| `Platform`   | —                     | `PlatformOpsAccess` | —                     | —                     |
+| `Admins`     | —                     | —                   | `AdministratorAccess` | `AdministratorAccess` |
+| `Billing`    | —                     | —                   | `BillingManagement`   | —                     |
 
 This repository creates neither accounts nor OUs nor SCPs. Make them once, in the
 management account, in **AWS Organizations → AWS accounts**, or with the CLI:
@@ -71,10 +83,15 @@ aws organizations move-account --account-id 111111111111 --source-parent-id "$RO
 `create-account` returns a request id; `aws organizations describe-create-account-status`
 gives the account id once it is ready. An existing account is only moved.
 
+Renaming an OU keeps its id and the SCPs attached to it. In an organization managed by
+**Control Tower**, create, rename and move OUs and accounts in Control Tower instead — a
+change made directly in Organizations shows up as drift, and the OU has to be
+re-registered.
+
 Then two steps, in this order:
 
 ```bash
-# 1. Once, in the management account: the permission sets everyone signs in with
+# 1. Once, in the management account: the permission sets, groups and assignments everyone signs in with
 make sso-plan  PROFILE=management   # shows what would change
 make sso-apply PROFILE=management   # create / update them
 
@@ -93,28 +110,54 @@ credentials you already have.
 
 Do this once, before bootstrapping any other account in the organization. People reach
 every account through IAM Identity Center, which lives in the management account, so the
-permission sets they sign in with have to exist before anyone works in the others. The
+permission sets they sign in with, the groups they belong to and which group gets which
+permission set in which account have to exist before anyone works in the others. One
+script, [`identity-center.sh`](identity-center.sh), creates all three from the files in
+[`identity-center/`](identity-center/). The
 management account gets no deploy roles — see [Why not a hub account](#why-not-a-hub-account) —
 and everything after this section is about the other accounts.
 
 There are five permission sets, defined in
 [`identity-center/permission-sets.json`](identity-center/permission-sets.json):
 
-| Permission set        | AWS managed policies               | Inline policy ([`identity-center/policies/`](identity-center/policies/))                                                                                                              | Session |
-| --------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `AdministratorAccess` | `AdministratorAccess`              | —                                                                                                                                                                                     | 1 hour  |
-| `PlatformOpsAccess`   | `PowerUserAccess`, `IAMFullAccess` | **Deny** access keys and console passwords, changes to the Identity Center and `OrganizationAccountAccessRole` roles, stopping CloudTrail, long-term purchases                        | 8 hours |
-| `DeveloperFullAccess` | `PowerUserAccess`                  | IAM read; `PassRole` for any role but the privileged ones; **deny** the privileged roles, Identity Center changes, turning off security tooling, billing changes, long-term purchases | 8 hours |
-| `DeveloperReadOnly`   | `ReadOnlyAccess`                   | **Deny** reading secret values                                                                                                                                                        | 8 hours |
-| `BillingManagement`   | `job-function/Billing`             | Read-only view of the organization's accounts and OUs                                                                                                                                 | 8 hours |
+| Permission set        | AWS managed policies               | Inline policy ([`identity-center/policies/`](identity-center/policies/))                                                                                                                                                                                               | Session |
+| --------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `AdministratorAccess` | `AdministratorAccess`              | —                                                                                                                                                                                                                                                                      | 1 hour  |
+| `PlatformOpsAccess`   | `PowerUserAccess`, `IAMFullAccess` | **Deny** access keys and console passwords, changes to the Identity Center and organization access roles, turning off security tooling, deleting backups or KMS keys, billing changes, long-term purchases                                                             | 8 hours |
+| `DeveloperFullAccess` | `PowerUserAccess`                  | IAM read; `PassRole` for any role but the privileged ones; **deny** the privileged roles, networking changes, large instance / database / cache sizes, expensive services, Identity Center changes, turning off security tooling, billing changes, long-term purchases | 8 hours |
+| `DeveloperReadOnly`   | `ReadOnlyAccess`                   | **Deny** reading secret values                                                                                                                                                                                                                                         | 8 hours |
+| `BillingManagement`   | `job-function/Billing`             | Read-only view of the organization's accounts and OUs                                                                                                                                                                                                                  | 8 hours |
 
 "Long-term purchases" are Savings Plans, reserved capacity (EC2, RDS, ElastiCache,
 Redshift, OpenSearch, DynamoDB), Shield Advanced and Marketplace subscriptions — each
 commits the company to a bill for a year or more. `AdministratorAccess` can still make
 them.
 
-`DeveloperFullAccess` is meant for development accounts: every service, but nothing
-written in IAM. Developers can pass any existing role to the services they build on — a
+`PlatformOpsAccess` is for running production, networking included: VPCs, subnets,
+routes, NAT and transit gateways, VPN, Direct Connect, DNS, and IAM. What it cannot do is
+the irreversible or the out-of-band: create access keys or console passwords, change the
+roles Identity Center and AWS Organizations sign in through, turn off the security tooling,
+or delete backups — AWS Backup vaults and recovery points, RDS and DynamoDB snapshots and
+backups — or schedule a KMS key for deletion. Those go through `AdministratorAccess`.
+
+`DeveloperFullAccess` is for **dev accounts only**: every service, but nothing written in
+IAM, and nothing that changes the network or runs up a large bill. The network is the
+platform's — developers use the VPCs, subnets and DNS zones Terraform made, and can
+create security groups, load balancers and DNS records in them, but cannot create or
+change a VPC, subnet, route, NAT, internet or transit gateway, VPN, endpoint, network ACL,
+peering, Elastic IP or hosted zone, nor use Direct Connect, Cloud WAN, Network Firewall,
+Global Accelerator, VPC Lattice, Resolver rules or RAM sharing. Instances are limited to
+`t3`/`t3a`/`t4g` and sizes up to `xlarge`, never GPU, accelerated or memory-optimised
+families; databases to `db.t3`/`db.t4g`, Serverless or `*.large`; caches to `cache.t3`/
+`cache.t4g` or `*.large`. EKS, EMR, MSK, Redshift, OpenSearch, MemoryDB, DocumentDB
+Elastic, Neptune Analytics, FSx, Kendra, WorkSpaces, SageMaker endpoints, training and
+notebooks, Bedrock provisioned throughput and fine-tuning, Lambda provisioned
+concurrency, dedicated hosts and capacity reservations cannot be created. The size
+limits apply to what a developer launches directly; an Auto Scaling group or ECS
+capacity provider launches as its own service role, so a budget alert on the dev account
+is still the backstop.
+
+Developers can pass any existing role to the services they build on — a
 function's execution role, an ECS task role, a SageMaker or EventBridge role; the services
 are listed under `iam:PassedToService`, add one there if a deploy needs it — except the
 privileged ones, which they can neither pass nor assume: `OrganizationAccountAccessRole`, the
@@ -135,6 +178,32 @@ GuardDuty, Security Hub, AWS Config or IAM Access Analyzer, or change billing, p
 methods or tax settings — Cost Explorer, budgets and invoices stay readable. "Long-term
 purchases" here also include registering or transferring a domain.
 
+### Groups and assignments
+
+Each group is a file in [`identity-center/groups/`](identity-center/groups/), named after
+the group, listing the permission set it gets in each account. An account is its name in
+AWS Organizations or its 12-digit ID:
+
+```json
+{
+  "description": "Developers: full access in dev, read-only in production.",
+  "assignments": [
+    { "account": "Dev", "permissionSet": "DeveloperFullAccess" },
+    { "account": "Production", "permissionSet": "DeveloperReadOnly" }
+  ]
+}
+```
+
+A new group is a new file; a new account is a line in each group that should reach it.
+Every name is checked before anything is called: a permission set that is not in
+`permission-sets.json`, an account name that matches no account (or more than one), or a
+suspended account stops the run.
+
+**Who is in a group is not set here** — add people in the console (**IAM Identity Center →
+Groups**) or in your identity provider. If Identity Center takes its users and groups from
+an external identity provider (Okta, Entra ID, Google Workspace), the groups come from it
+too: create them there, let them sync, and the script finds them by name.
+
 ### Creating them
 
 ```bash
@@ -142,11 +211,14 @@ make sso-plan  PROFILE=management   # the plan, every inline policy, and Access 
 make sso-apply PROFILE=management   # create or update them; asks first unless YES=1
 ```
 
-Safe to re-run: each permission set's description, session duration, managed policies
-and inline policy are made to match the files, and a changed permission set is
-re-provisioned to every account it is assigned in. It never deletes a permission set and
-never touches an assignment. Permission sets not in the file are listed and left alone.
-IAM Identity Center is in one region: set `SSO_REGION` if it is not your profile's.
+It works in three steps — permission sets, then groups, then assignments — and is safe to
+re-run. Each permission set's description, session duration, managed policies and inline
+policy are made to match the files, and a changed permission set is re-provisioned to
+every account it is assigned in. A missing group is created and a missing assignment is
+made. It never deletes a permission set or a group and **never removes an assignment**:
+one that a group has in AWS but not in its file is listed in the plan and left alone, as
+are permission sets and groups that are not in the files. IAM Identity Center is in one
+region: set `SSO_REGION` if it is not your profile's.
 
 Or paste them by hand. In the console, **IAM Identity Center → Permission sets → Create
 permission set → Custom permission set**, attach the managed policies, and paste the
@@ -163,10 +235,7 @@ aws sso-admin put-inline-policy-to-permission-set --instance-arn "$INSTANCE" --p
   --inline-policy file://identity-center/policies/DeveloperFullAccess.json
 ```
 
-**Assigning them is up to you**: which group gets which permission set in which account
-is set in the console (**AWS accounts → Assign users or groups**) or with
-`aws sso-admin create-account-assignment`. Once they are assigned, sign in to the next
-account and run step 2.
+Once the groups have their people, sign in to the next account and run step 2.
 
 ## What it creates
 
