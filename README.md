@@ -752,6 +752,170 @@ If a Terragrunt root config is shared by every environment, switch per environme
 list of environments already on direct access, checked against the one parsed from the
 path), or migrating one account moves them all.
 
+## Deploying the platform services
+
+Two services are built to run in every account this bootstraps. Both are SAM
+applications, so they deploy like any other app stack: `app-deploy-role` drives
+CloudFormation, and `app-cfn-exec-role` creates the resources.
+
+| Service                                                                                             | What it does                                                                                                                 | Capabilities                                    |
+| --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| [events-observability](https://github.com/jnet-platform-factory/events-observability)               | Indexes every event on an EventBridge bus into OpenSearch, with an error-alert digest, dead-letter queues and alarms         | `CAPABILITY_NAMED_IAM` `CAPABILITY_AUTO_EXPAND` |
+| [aws-daily-monitoring-report](https://github.com/jnet-platform-factory/aws-daily-monitoring-report) | Emails the account's health every day — alarms, cost, Lambda, EventBridge, RDS — and optionally writes a JSON snapshot to S3 | `CAPABILITY_IAM`                                |
+
+Each service's README is the reference for its parameters. This section covers how to
+deploy them through the bootstrap's roles, and what to check before trusting them.
+
+### Two ways to deploy them
+
+**From your machine**, in your own SSO session. Clone the service, build it, and deploy
+it with `--role-arn` set to the execution role, so the resources are created exactly as
+CI would create them:
+
+```bash
+sam deploy --role-arn arn:aws:iam::123456789012:role/app-cfn-exec-role …
+```
+
+Leave `--role-arn` out and CloudFormation acts as you instead. That works too, but it
+does not prove the execution role can do it.
+
+**From CI**, with a small deployment repository of your own: list it in `APP_REPOS`,
+[re-run the bootstrap](#re-running-adding-a-repository-or-an-environment), and copy
+[`sam-deploy.yml`](examples/github-actions/sam-deploy.yml) into it. The service's
+source goes in as a git submodule pinned to a release. Its per-environment parameters
+go in your own `samconfig.toml`, which is where they belong: they name your addresses,
+domains and buckets. The public repository is not the place for them. Make four changes
+to the copied workflow:
+
+1. `actions/checkout` with `submodules: true`.
+2. `sam build --template <submodule>/template.yaml`, and `--use-container` for
+   events-observability. Its dependencies include compiled wheels, which must match
+   the Lambda runtime.
+3. `--config-env "${STAGE}"` on `sam deploy`, so each GitHub environment reads its own
+   section of `samconfig.toml`.
+4. `--capabilities` from the table above. The generated workflow passes
+   `CAPABILITY_IAM`, and events-observability's explicitly named roles need
+   `CAPABILITY_NAMED_IAM`.
+
+```toml
+# samconfig.toml in the deployment repository — one section per GitHub environment
+[dev.deploy.parameters]
+parameter_overrides = "RecipientEmail=ops@example.com SenderEmail=reports@example.com AccountName=Dev"
+
+[production.deploy.parameters]
+parameter_overrides = "RecipientEmail=ops@example.com SenderEmail=reports@example.com AccountName=Production"
+```
+
+The workflow names the stack `<repository>-<env>`, so give each service its own
+deployment repository, or its own job with its own `--stack-name`.
+
+**Not yet: nesting the published application.** Both services are, or will be,
+published to the Serverless Application Repository. A template that nests one, as an
+`AWS::Serverless::Application`, does not deploy through `app-cfn-exec-role` today. SAM
+expands the nested application by calling `serverlessrepo` and creates it as a nested
+`AWS::CloudFormation::Stack`, and with `--role-arn` both happen as the execution role,
+which has neither `serverlessrepo:*` nor CloudFormation stack permissions. Deploy from
+source as above until it does.
+
+### events-observability
+
+Every event on a bus, indexed into an OpenSearch domain or Serverless collection
+**that you own** — the stack does not create one. Its README's
+[onboarding section](https://github.com/jnet-platform-factory/events-observability#onboarding-a-new-deployment)
+is the long version. The order below matters because of the grant.
+
+1. **Deploy with `CreateForwardingRule=false`.** The stack creates its role, but
+   nothing that writes to the domain yet:
+
+   ```bash
+   git clone https://github.com/jnet-platform-factory/events-observability
+   cd events-observability
+   sam build --use-container
+   sam deploy --stack-name events-observability-dev --resolve-s3 \
+     --role-arn arn:aws:iam::123456789012:role/app-cfn-exec-role \
+     --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+     --parameter-overrides NamePrefix=acme EnvironmentName=dev \
+       OpenSearchEndpoint=search-acme-xxxx.us-east-1.es.amazonaws.com \
+       "OpenSearchResourceArn=arn:aws:es:us-east-1:123456789012:domain/acme/*" \
+       OpenSearchIndex=acme-events CreateForwardingRule=false AlertEmail=ops@example.com
+   ```
+
+2. **Grant the stack's role on the domain**, after the stack exists, never before.
+   That is `ForwarderRoleArn` from the stack outputs, or `FirehoseDeliveryRoleArn` with
+   `DeliveryMode=Firehose`. An OpenSearch access policy that names a principal which
+   does not exist yet is rejected with `409 InvalidTypeException`, about 31 minutes
+   after the update starts rather than when you submit it. Remove a grant before you
+   delete the stack, for the same reason. If the domain is in another account, the
+   grant is a change to that account's domain policy.
+3. **Turn delivery on**: deploy again with `CreateForwardingRule=true`.
+4. **Confirm the alarm subscription.** `AlertEmail` subscribes an address to the alarm
+   topic, and the subscription stays `PendingConfirmation` until someone clicks the
+   link. Until then every alarm is "successfully" delivered to nobody.
+
+**One index per deployment** (`OpenSearchIndex`). The index has no explicit mapping, so
+the first value written to a field fixes its type for good, for everyone writing to
+that index.
+
+**To check it works**, publish a marked event and read it back out of the index:
+
+```bash
+aws events put-events --entries '[{
+  "Source":"acme.verify","DetailType":"Probe","EventBusName":"<the stack'\''s bus>",
+  "Detail":"{\"organization\":\"probe-001\",\"username\":\"validator\"}"}]'
+```
+
+then search the index for `probe-001`. Expect exactly one document: two means a second
+rule also feeds the forwarder, and none means the grant, the rule or the invoke
+permission.
+
+Against the execution role's policy, every resource type the template declares is
+covered: functions, API Gateway v2, the bus and its rules, SQS, SNS, the Firehose
+stream and its backup bucket, alarms, log groups, and the named roles with `PassRole`
+to Lambda, EventBridge and Firehose. That was checked against the policy. It has not
+been proved by a deploy in each delivery mode.
+
+### aws-daily-monitoring-report
+
+One email a day, at 10:00 UTC by default. It covers the account and region the stack
+runs in. Two things must be in place first:
+
+- **SES**: `SenderEmail` must be a verified identity in the stack's region, and so
+  must `RecipientEmail` while the account's SES is in the sandbox.
+- **Cost Explorer**: in a member account of an AWS Organization, the management account
+  must enable member-account access to billing data. Without it the report still sends,
+  and its cost section says Cost Explorer is unavailable.
+
+```bash
+git clone https://github.com/jnet-platform-factory/aws-daily-monitoring-report
+cd aws-daily-monitoring-report
+sam build
+sam deploy --stack-name aws-daily-monitoring-report --resolve-s3 \
+  --role-arn arn:aws:iam::123456789012:role/app-cfn-exec-role \
+  --capabilities CAPABILITY_IAM \
+  --parameter-overrides RecipientEmail=ops@example.com SenderEmail=reports@example.com \
+    AccountName=Dev
+```
+
+The stack is one function, its role, and a schedule, all within the execution role's
+policy. The function has a fixed name, `aws-daily-monitoring-report`, so two stacks in
+one account and region (one per stage) need `FunctionNameSuffix`.
+
+**The snapshot is opt-in.** Set `SnapshotBucket` and `SnapshotSlug` and each run also
+writes `<prefix><slug>.json`, for a dashboard to read. The bucket is not created by the
+stack. If it lives in another account, that bucket's policy must grant this account
+`s3:PutObject` and `s3:PutObjectAcl` on the prefix first. Until then every write fails
+with 403, and the email still arrives.
+
+**To check it works**, send a report now:
+
+```bash
+aws lambda invoke --function-name aws-daily-monitoring-report \
+  --payload '{}' --cli-binary-format raw-in-base64-out /dev/stdout
+```
+
+Expect `"statusCode": 200` and an email within a minute. With a snapshot bucket set,
+`"snapshotWritten": true` is the only proof the snapshot landed.
+
 ## Requirements
 
 - AWS CLI v2, and IAM admin in the target account
