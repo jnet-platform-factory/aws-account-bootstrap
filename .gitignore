@@ -3,3 +3,4 @@ bootstrap.env
 __pycache__/
 .history/
 outputs/
+/.claude
