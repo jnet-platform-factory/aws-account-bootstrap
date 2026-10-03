@@ -1,0 +1,60 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyLongLivedCredentials",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateAccessKey",
+        "iam:CreateLoginProfile",
+        "iam:UpdateLoginProfile"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyTouchingTheAccessRoles",
+      "Effect": "Deny",
+      "Action": [
+        "iam:Create*",
+        "iam:Update*",
+        "iam:Delete*",
+        "iam:Put*",
+        "iam:Attach*",
+        "iam:Detach*",
+        "iam:Tag*",
+        "iam:Untag*"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:role/aws-reserved/sso.amazonaws.com/*",
+        "arn:aws:iam::*:role/OrganizationAccountAccessRole"
+      ]
+    },
+    {
+      "Sid": "DenyStoppingTheAuditTrail",
+      "Effect": "Deny",
+      "Action": [
+        "cloudtrail:StopLogging",
+        "cloudtrail:DeleteTrail"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyLongTermCommitments",
+      "Effect": "Deny",
+      "Action": [
+        "savingsplans:CreateSavingsPlan",
+        "ec2:PurchaseReservedInstancesOffering",
+        "ec2:PurchaseHostReservation",
+        "ec2:AcceptReservedInstancesExchangeQuote",
+        "rds:PurchaseReservedDBInstancesOffering",
+        "elasticache:PurchaseReservedCacheNodesOffering",
+        "redshift:PurchaseReservedNodeOffering",
+        "es:PurchaseReservedInstanceOffering",
+        "dynamodb:PurchaseReservedCapacityOfferings",
+        "shield:CreateSubscription",
+        "aws-marketplace:Subscribe"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

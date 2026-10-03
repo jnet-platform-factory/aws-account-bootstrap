@@ -1,0 +1,56 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadIam",
+      "Effect": "Allow",
+      "Action": [
+        "iam:Get*",
+        "iam:List*",
+        "iam:GenerateServiceLastAccessedDetails",
+        "iam:SimulatePrincipalPolicy"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "PassTheAppExecutionRole",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::*:role/app-cfn-exec-role",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "cloudformation.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "PassTheLambdaTestRole",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::*:role/lambda-test-role",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "lambda.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "DenyLongTermCommitments",
+      "Effect": "Deny",
+      "Action": [
+        "savingsplans:CreateSavingsPlan",
+        "ec2:PurchaseReservedInstancesOffering",
+        "ec2:PurchaseHostReservation",
+        "ec2:AcceptReservedInstancesExchangeQuote",
+        "rds:PurchaseReservedDBInstancesOffering",
+        "elasticache:PurchaseReservedCacheNodesOffering",
+        "redshift:PurchaseReservedNodeOffering",
+        "es:PurchaseReservedInstanceOffering",
+        "dynamodb:PurchaseReservedCapacityOfferings",
+        "shield:CreateSubscription",
+        "aws-marketplace:Subscribe"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

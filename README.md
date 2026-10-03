@@ -5,18 +5,89 @@ Keyless, scoped deploy roles for an AWS account — one for your **platform**
 script that has to exist before either tool can run. It also creates each repository's
 GitHub environments and sets the variables its workflows need to assume those roles,
 and writes a Terragrunt `root.hcl` and GitHub Actions workflows, filled in for your
-accounts, to copy into those repositories.
+accounts, to copy into those repositories. And, in the organization's management
+account, the IAM Identity Center permission sets people sign in with.
+
+Two steps, in this order:
 
 ```bash
-make plan  PROFILE=dev           # asks for anything it needs, then shows what would change
-make apply PROFILE=dev ENV=dev   # create / update the roles and the GitHub environments
-make check PROFILE=dev           # read-only policy checks
+# 1. Once, in the management account: the permission sets everyone signs in with
+make sso-plan  PROFILE=management   # shows what would change
+make sso-apply PROFILE=management   # create / update them
+
+# 2. Then in each of the other accounts: the deploy roles
+make plan  PROFILE=dev              # asks for anything it needs, then shows what would change
+make apply PROFILE=dev ENV=dev      # create / update the roles and the GitHub environments
+make check PROFILE=dev              # read-only policy checks
 ```
 
 The first run asks for your GitHub organisation, repositories, environments and
 regions, and offers to save the answers to `bootstrap.env`; every later run asks again,
 with the saved answers as defaults, so Enter confirms each one. `PROFILE` is an aws-vault profile — leave it out to use the
 credentials you already have.
+
+## First: the management account
+
+Do this once, before bootstrapping any other account in the organization. People reach
+every account through IAM Identity Center, which lives in the management account, so the
+permission sets they sign in with have to exist before anyone works in the others. The
+management account gets no deploy roles — see [Why not a hub account](#why-not-a-hub-account) —
+and everything after this section is about the other accounts.
+
+There are five permission sets, defined in
+[`identity-center/permission-sets.json`](identity-center/permission-sets.json):
+
+| Permission set        | AWS managed policies               | Inline policy ([`identity-center/policies/`](identity-center/policies/))                                                                                       | Session |
+| --------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `AdministratorAccess` | `AdministratorAccess`              | —                                                                                                                                                              | 1 hour  |
+| `PlatformOpsAccess`   | `PowerUserAccess`, `IAMFullAccess` | **Deny** access keys and console passwords, changes to the Identity Center and `OrganizationAccountAccessRole` roles, stopping CloudTrail, long-term purchases | 8 hours |
+| `DeveloperFullAccess` | `PowerUserAccess`                  | IAM read; `PassRole` for `app-cfn-exec-role` to CloudFormation and `lambda-test-role` to Lambda; **deny** long-term purchases                                  | 8 hours |
+| `DeveloperReadOnly`   | `ReadOnlyAccess`                   | **Deny** reading secret values                                                                                                                                 | 8 hours |
+| `BillingManagement`   | `job-function/Billing`             | Read-only view of the organization's accounts and OUs                                                                                                          | 8 hours |
+
+"Long-term purchases" are Savings Plans, reserved capacity (EC2, RDS, ElastiCache,
+Redshift, OpenSearch, DynamoDB), Shield Advanced and Marketplace subscriptions — each
+commits the company to a bill for a year or more. `AdministratorAccess` can still make
+them.
+
+`DeveloperFullAccess` creates nothing in IAM. A SAM deploy from a laptop works the way CI
+does: pass `--role-arn` for `app-cfn-exec-role` (or set `role_arn` in `samconfig.toml`)
+and CloudFormation creates the function roles. The role names are the defaults from
+step 2 ([What it creates](#what-it-creates)); if you rename them in `bootstrap.env`,
+change them in [`DeveloperFullAccess.json`](identity-center/policies/DeveloperFullAccess.json) too.
+
+### Creating them
+
+```bash
+make sso-plan  PROFILE=management   # the plan, every inline policy, and Access Analyzer's findings
+make sso-apply PROFILE=management   # create or update them; asks first unless YES=1
+```
+
+Safe to re-run: each permission set's description, session duration, managed policies
+and inline policy are made to match the files, and a changed permission set is
+re-provisioned to every account it is assigned in. It never deletes a permission set and
+never touches an assignment. Permission sets not in the file are listed and left alone.
+IAM Identity Center is in one region: set `SSO_REGION` if it is not your profile's.
+
+Or paste them by hand. In the console, **IAM Identity Center → Permission sets → Create
+permission set → Custom permission set**, attach the managed policies, and paste the
+JSON file as the inline policy. With the CLI, for one permission set:
+
+```bash
+INSTANCE=$(aws sso-admin list-instances --query 'Instances[0].InstanceArn' --output text)
+PS=$(aws sso-admin create-permission-set --instance-arn "$INSTANCE" --name DeveloperFullAccess \
+       --session-duration PT8H --description "Developers: every service except IAM, which is read-only." \
+       --query 'PermissionSet.PermissionSetArn' --output text)
+aws sso-admin attach-managed-policy-to-permission-set --instance-arn "$INSTANCE" --permission-set-arn "$PS" \
+  --managed-policy-arn arn:aws:iam::aws:policy/PowerUserAccess
+aws sso-admin put-inline-policy-to-permission-set --instance-arn "$INSTANCE" --permission-set-arn "$PS" \
+  --inline-policy file://identity-center/policies/DeveloperFullAccess.json
+```
+
+**Assigning them is up to you**: which group gets which permission set in which account
+is set in the console (**AWS accounts → Assign users or groups**) or with
+`aws sso-admin create-account-assignment`. Once they are assigned, sign in to the next
+account and run step 2.
 
 ## What it creates
 
