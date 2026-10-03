@@ -1,0 +1,41 @@
+{
+  "permissionSets": [
+    {
+      "name": "AdministratorAccess",
+      "description": "Full access to the account. For account administration and break-glass use.",
+      "sessionDuration": "PT1H",
+      "managedPolicies": ["arn:aws:iam::aws:policy/AdministratorAccess"]
+    },
+    {
+      "name": "PlatformOpsAccess",
+      "description": "Platform team: every service including IAM. No access keys or console passwords, no changes to the Identity Center or organization access roles, no stopping CloudTrail, no long-term purchases.",
+      "sessionDuration": "PT8H",
+      "managedPolicies": [
+        "arn:aws:iam::aws:policy/PowerUserAccess",
+        "arn:aws:iam::aws:policy/IAMFullAccess"
+      ],
+      "inlinePolicy": "policies/PlatformOpsAccess.json"
+    },
+    {
+      "name": "DeveloperFullAccess",
+      "description": "Developers: every service except IAM, which is read-only. Can pass app-cfn-exec-role to CloudFormation and lambda-test-role to Lambda. No long-term purchases.",
+      "sessionDuration": "PT8H",
+      "managedPolicies": ["arn:aws:iam::aws:policy/PowerUserAccess"],
+      "inlinePolicy": "policies/DeveloperFullAccess.json"
+    },
+    {
+      "name": "DeveloperReadOnly",
+      "description": "Developers: read-only access to every service, logs included. No secret values.",
+      "sessionDuration": "PT8H",
+      "managedPolicies": ["arn:aws:iam::aws:policy/ReadOnlyAccess"],
+      "inlinePolicy": "policies/DeveloperReadOnly.json"
+    },
+    {
+      "name": "BillingManagement",
+      "description": "Billing, payments, budgets and cost reports, and a read-only view of the organization's accounts.",
+      "sessionDuration": "PT8H",
+      "managedPolicies": ["arn:aws:iam::aws:policy/job-function/Billing"],
+      "inlinePolicy": "policies/BillingManagement.json"
+    }
+  ]
+}

@@ -572,6 +572,63 @@ hosted zone, or launch instances.
 analyzer does not evaluate deny statements. The simulator accepts at most 2000
 characters per document, so each policy is split into chunks first.
 
+## IAM Identity Center permission sets
+
+The roles above are for CI. People sign in through IAM Identity Center, with one of five
+permission sets, defined in [`identity-center/permission-sets.json`](identity-center/permission-sets.json).
+They live in the **management account**, not in the accounts this bootstrap sets up.
+
+| Permission set        | AWS managed policies               | Inline policy ([`identity-center/policies/`](identity-center/policies/))                                                                                       | Session |
+| --------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `AdministratorAccess` | `AdministratorAccess`              | —                                                                                                                                                              | 1 hour  |
+| `PlatformOpsAccess`   | `PowerUserAccess`, `IAMFullAccess` | **Deny** access keys and console passwords, changes to the Identity Center and `OrganizationAccountAccessRole` roles, stopping CloudTrail, long-term purchases | 8 hours |
+| `DeveloperFullAccess` | `PowerUserAccess`                  | IAM read; `PassRole` for `app-cfn-exec-role` to CloudFormation and `lambda-test-role` to Lambda; **deny** long-term purchases                                  | 8 hours |
+| `DeveloperReadOnly`   | `ReadOnlyAccess`                   | **Deny** reading secret values                                                                                                                                 | 8 hours |
+| `BillingManagement`   | `job-function/Billing`             | Read-only view of the organization's accounts and OUs                                                                                                          | 8 hours |
+
+"Long-term purchases" are Savings Plans, reserved capacity (EC2, RDS, ElastiCache,
+Redshift, OpenSearch, DynamoDB), Shield Advanced and Marketplace subscriptions — each
+commits the company to a bill for a year or more. `AdministratorAccess` can still make
+them.
+
+`DeveloperFullAccess` creates nothing in IAM. A SAM deploy from a laptop works the way CI
+does: pass `--role-arn` for `app-cfn-exec-role` (or set `role_arn` in `samconfig.toml`)
+and CloudFormation creates the function roles. The role names are the defaults; if you
+renamed them in `bootstrap.env`, change them in
+[`DeveloperFullAccess.json`](identity-center/policies/DeveloperFullAccess.json) too.
+
+### Creating them
+
+```bash
+make sso-plan  PROFILE=management   # the plan, every inline policy, and Access Analyzer's findings
+make sso-apply PROFILE=management   # create or update them; asks first unless YES=1
+```
+
+Safe to re-run: each permission set's description, session duration, managed policies
+and inline policy are made to match the files, and a changed permission set is
+re-provisioned to every account it is assigned in. It never deletes a permission set and
+never touches an assignment. Permission sets not in the file are listed and left alone.
+IAM Identity Center is in one region: set `SSO_REGION` if it is not your profile's.
+
+Or paste them by hand. In the console, **IAM Identity Center → Permission sets → Create
+permission set → Custom permission set**, attach the managed policies, and paste the
+JSON file as the inline policy. With the CLI, for one permission set:
+
+```bash
+INSTANCE=$(aws sso-admin list-instances --query 'Instances[0].InstanceArn' --output text)
+PS=$(aws sso-admin create-permission-set --instance-arn "$INSTANCE" --name DeveloperFullAccess \
+       --session-duration PT8H --description "Developers: every service except IAM, which is read-only." \
+       --query 'PermissionSet.PermissionSetArn' --output text)
+aws sso-admin attach-managed-policy-to-permission-set --instance-arn "$INSTANCE" --permission-set-arn "$PS" \
+  --managed-policy-arn arn:aws:iam::aws:policy/PowerUserAccess
+aws sso-admin put-inline-policy-to-permission-set --instance-arn "$INSTANCE" --permission-set-arn "$PS" \
+  --inline-policy file://identity-center/policies/DeveloperFullAccess.json
+```
+
+**Assigning them is up to you**: which group gets which permission set in which account
+is set in the console (**AWS accounts → Assign users or groups**) or with
+`aws sso-admin create-account-assignment`.
+
 ## Using the roles: the outputs
 
 Every `apply` records the account it ran in under `outputs/accounts/` (git-ignored) and
