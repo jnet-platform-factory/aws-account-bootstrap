@@ -1,0 +1,73 @@
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: 'How to bump the version?'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+        - patch
+        - minor
+        - major
+
+permissions:
+  contents: write
+
+jobs:
+  release_tag:
+    runs-on: ubuntu-latest
+    outputs:
+      new_tag: ${{ steps.tag_version.outputs.new_tag }}
+      previous_tag: ${{ steps.tag_version.outputs.previous_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Bump version and push tag
+        id: tag_version
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.CICD_ACCESS_TOKEN || github.token }}
+          default_bump: ${{ github.event.inputs.bump_type }}
+          bump_type: ${{ github.event.inputs.bump_type }}
+
+      - name: Create a GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.tag_version.outputs.new_tag }}
+          name: ${{ steps.tag_version.outputs.new_tag }}
+          body: ${{ steps.tag_version.outputs.changelog }}
+          make_latest: true
+
+      - name: Create Release Branch
+        run: |
+          git checkout -b release/${{ steps.tag_version.outputs.new_tag }}
+          git push origin release/${{ steps.tag_version.outputs.new_tag }} --force
+
+  # A job of its own (JNET-2998): the action is pinned to a movable tag in
+  # another org, so it runs where no write token is persisted.
+  summary:
+    name: Summary
+    needs: [release_tag]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Summary
+        if: always()
+        continue-on-error: true
+        uses: jnet-platform-factory/.github/actions/job-summary@v0.0.1
+        with:
+          title: Create release — ${{ github.event.inputs.bump_type }}
+          needs: ${{ toJSON(needs) }}
+          rows: |
+            Release: ${{ needs.release_tag.outputs.new_tag && format('[{0}]({1}/{2}/releases/tag/{0})', needs.release_tag.outputs.new_tag, github.server_url, github.repository) || '' }}
+            Previous tag: ${{ needs.release_tag.outputs.previous_tag }}
+            Release branch: ${{ needs.release_tag.result == 'success' && format('[release/{0}]({1}/{2}/tree/release/{0})', needs.release_tag.outputs.new_tag, github.server_url, github.repository) || '' }}
+            Bump: ${{ github.event.inputs.bump_type }}
+            Commit: ${{ github.sha }}
