@@ -7,14 +7,14 @@
       "managedPolicies": ["arn:aws:iam::aws:policy/AdministratorAccess"]
     },
     {
-      "name": "PlatformOpsAccess",
+      "name": "PlatformOps",
       "description": "Platform team, production operations: every service including IAM and networking. No access keys or console passwords, no changes to the Identity Center or organization access roles, no turning off security tooling, no deleting backups or KMS keys, no billing changes, no long-term purchases.",
       "sessionDuration": "PT8H",
       "managedPolicies": [
         "arn:aws:iam::aws:policy/PowerUserAccess",
         "arn:aws:iam::aws:policy/IAMFullAccess"
       ],
-      "inlinePolicy": "policies/PlatformOpsAccess.json"
+      "inlinePolicy": "policies/PlatformOps.json"
     },
     {
       "name": "DeveloperFullAccess",

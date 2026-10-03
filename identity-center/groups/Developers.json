@@ -1,5 +1,6 @@
 {
   "description": "Developers: full access in dev, read-only in production.",
+  "formerly": ["Developer", "DeveloperFullAccess"],
   "assignments": [
     { "account": "Dev", "permissionSet": "DeveloperFullAccess" },
     { "account": "Production", "permissionSet": "DeveloperReadOnly" }

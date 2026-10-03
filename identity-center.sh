@@ -8,12 +8,17 @@
 #                          AWS managed policies attached to it (any others are
 #                          detached) and its inline policy from policies/. One that
 #                          changed is re-provisioned to every account it is assigned in.
-#   groups/<Group>.json    a group, created if missing, and its assignments. An
-#                          account is its name in AWS Organizations or its 12-digit ID.
+#   groups/<Group>.json    a group, created if missing, and its assignments. Each names
+#                          "account" (its name in AWS Organizations or its 12-digit ID)
+#                          or "ou" (an OU path from the root, Management or Workloads/Prod,
+#                          that holds exactly one active account). "formerly" lists
+#                          older names: a group that does not exist yet takes over the
+#                          former group with the most members, renamed in place, and
+#                          the members of the other former groups are added to it.
 #
-# It never deletes a permission set or a group, never removes an assignment, and
-# never changes who is in a group. Assignments in AWS that the files do not list are
-# reported and left alone.
+# Re-running it changes nothing that already matches. It never deletes a permission
+# set or a group, never removes an assignment, and never removes anyone from a group.
+# Assignments in AWS that the files do not list are reported and left alone.
 #
 # Usage:
 #   ./identity-center.sh [--dry-run] [--yes]
@@ -37,7 +42,7 @@ for arg in "$@"; do
   case "${arg}" in
     --dry-run) DRY_RUN=1 ;;
     --yes|-y)  ASSUME_YES=1 ;;
-    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)         die "unknown argument ${arg}" ;;
   esac
 done
@@ -53,7 +58,8 @@ WORK="$(mktemp -d)"; trap 'rm -rf "${WORK}"' EXIT
 # Everything is checked before anything is called. One line each:
 #   definitions  name <TAB> session duration <TAB> inline policy file or - <TAB> managed policy ARNs or - <TAB> description
 #   groups       name <TAB> description
-#   assignments  group <TAB> account name or ID <TAB> permission set
+#   formerly     group <TAB> an older name of it
+#   assignments  group <TAB> account or ou <TAB> account name or ID, or OU path <TAB> permission set
 python3 - "${DEFS_DIR}" "${WORK}" > "${WORK}/definitions" <<'PY'
 import json, re, sys
 from pathlib import Path
@@ -93,7 +99,8 @@ for s in json.load(open(defs / "permission-sets.json"))["permissionSets"]:
 if problems:
     sys.exit("identity-center/permission-sets.json:\n  " + "\n  ".join(problems))
 
-groups, assignments = [], []
+groups, assignments, formerly = [], [], []
+files = {p.stem for p in (defs / "groups").glob("*.json")}
 for path in sorted((defs / "groups").glob("*.json")):
     where, group = f"identity-center/groups/{path.name}", path.stem
     if not re.fullmatch(r"[\w+=,.@ -]{1,128}", group):
@@ -107,20 +114,38 @@ for path in sorted((defs / "groups").glob("*.json")):
     if len(description) > 1024 or not all(32 <= ord(c) < 127 for c in description):
         problems.append(f"{where}: the description must be at most 1024 plain ASCII characters")
     groups.append(f"{group}\t{description}")
+    old = g.get("formerly", [])
+    if not isinstance(old, list):
+        problems.append(f"{where}: formerly is a list of group names")
+        old = []
+    for name in old:
+        if not isinstance(name, str) or not re.fullmatch(r"[\w+=,.@ -]{1,128}", name):
+            problems.append(f"{where}: formerly {name!r} is not a group name")
+        elif name in files:
+            problems.append(f"{where}: formerly {name} is a group with its own file")
+        elif name in (f for _, f in formerly):
+            problems.append(f"{where}: formerly {name} is claimed by more than one group")
+        else:
+            formerly.append((group, name))
     seen = set()
     for a in g.get("assignments", []):
-        account, ps = str(a.get("account", "")).strip(), a.get("permissionSet", "")
-        if not account or "\t" in account:
-            problems.append(f"{where}: an assignment without an account")
+        targets = [(k, str(a[k]).strip().strip("/")) for k in ("account", "ou") if k in a]
+        kind, target = targets[0] if len(targets) == 1 else ("", "")
+        ps, label = a.get("permissionSet", ""), f"{'OU ' if kind == 'ou' else ''}{target}"
+        if len(targets) > 1:
+            problems.append(f"{where}: an assignment names both an account and an OU; give one")
+        elif not target or "\t" in target:
+            problems.append(f"{where}: an assignment without an account or an OU")
         elif ps not in names:
-            problems.append(f"{where}: {ps!r} in {account} is not a permission set in permission-sets.json")
-        elif (account, ps) in seen:
-            problems.append(f"{where}: {ps} in {account} is listed twice")
+            problems.append(f"{where}: {ps!r} in {label} is not a permission set in permission-sets.json")
+        elif (kind, target, ps) in seen:
+            problems.append(f"{where}: {ps} in {label} is listed twice")
         else:
-            seen.add((account, ps))
-            assignments.append(f"{group}\t{account}\t{ps}")
+            seen.add((kind, target, ps))
+            assignments.append(f"{group}\t{kind}\t{target}\t{ps}")
 (work / "groups").write_text("".join(f"{l}\n" for l in groups))
 (work / "assignments").write_text("".join(f"{l}\n" for l in assignments))
+(work / "formerly").write_text("".join(f"{g}\t{n}\n" for g, n in formerly))
 if problems:
     sys.exit("identity-center/groups:\n  " + "\n  ".join(problems))
 PY
@@ -164,6 +189,28 @@ if (( HAVE_CREDENTIALS )); then
     > "${WORK}/accounts" 2> "${WORK}/accounts.error" || true
 fi
 
+# Where each account sits, when an assignment names an OU: OU path <TAB> account ID,
+# and OU path <TAB> nothing for every OU, so an empty one is known too. The path is the
+# OU names from the root joined by /, and empty for the root itself.
+walk_ous() {  # walk_ous <parent ID> <path>
+  local id name
+  [[ -n "$2" ]] && printf '%s\t\n' "$2"
+  aws organizations list-accounts-for-parent --parent-id "$1" --query 'Accounts[].Id' --output text |
+    tr '\t' '\n' | awk -v p="$2" 'NF && $1 != "None" { print p "\t" $1 }'
+  while IFS=$'\t' read -r id name; do
+    [[ -z "${id}" || "${id}" == "None" ]] && continue
+    walk_ous "${id}" "${2:+$2/}${name}"
+  done < <(aws organizations list-organizational-units-for-parent --parent-id "$1" \
+             --query 'OrganizationalUnits[].[Id,Name]' --output text)
+}
+: > "${WORK}/placement"
+: > "${WORK}/placement.error"
+if (( HAVE_CREDENTIALS )) && awk -F'\t' '$2 == "ou" { f = 1 } END { exit !f }' "${WORK}/assignments"; then
+  {
+    root="$(aws organizations list-roots --query 'Roots[0].Id' --output text)" && walk_ous "${root}" ""
+  } > "${WORK}/placement" 2> "${WORK}/placement.error" || true
+fi
+
 # Each assignment with its account resolved:
 #   group <TAB> account ID (- without credentials) <TAB> label for the plan <TAB> permission set
 python3 - "${WORK}" "${HAVE_CREDENTIALS}" > "${WORK}/resolved" <<'PY'
@@ -177,12 +224,31 @@ for line in (work / "accounts").read_text().splitlines():
         id_, name, state, status = (line.split("\t") + ["None"] * 4)[:4]
         accounts[id_] = (name, state if state != "None" else status)
 error = (work / "accounts.error").read_text().strip()
-problems = []
+placement = [l.split("\t") for l in (work / "placement").read_text().splitlines() if "\t" in l]
+placement_error = (work / "placement.error").read_text().strip()
+problems, printed = [], set()
 for line in (work / "assignments").read_text().splitlines():
-    group, account, ps = line.split("\t")
-    where = f"groups/{group}.json: {ps} in {account}"
+    group, kind, account, ps = line.split("\t")
+    where = f"groups/{group}.json: {ps} in {'OU ' if kind == 'ou' else ''}{account}"
     if not have_credentials:
-        id_, label = "-", account
+        id_, label = "-", f"OU {account}" if kind == "ou" else account
+    elif kind == "ou":
+        if placement_error or not placement:
+            problems.append(f"{where}: cannot look up OUs ({placement_error or 'no accounts listed'}); "
+                            "give the account instead")
+            continue
+        ous = {p for p, _ in placement if p}
+        if account not in ous:
+            problems.append(f"{where}: no OU {account} (there are: {', '.join(sorted(ous)) or 'none'})")
+            continue
+        active = [i for p, i in placement if p == account and i and accounts.get(i, ("", "ACTIVE"))[1] == "ACTIVE"]
+        if len(active) != 1:
+            names = ", ".join(accounts.get(i, (i,))[0] for i in active)
+            problems.append(f"{where}: OU {account} holds {len(active)} active accounts"
+                            + (f" ({names}); name the account instead" if active else ""))
+            continue
+        id_ = active[0]
+        label = f"{accounts[id_][0]} ({id_}), OU {account}" if id_ in accounts else f"{id_}, OU {account}"
     elif re.fullmatch(r"\d{12}", account):
         id_ = account
         if accounts and id_ not in accounts:
@@ -205,13 +271,17 @@ for line in (work / "assignments").read_text().splitlines():
     if id_ in accounts and accounts[id_][1] != "ACTIVE":
         problems.append(f"{where}: account {id_} is {accounts[id_][1]}")
         continue
+    if id_ != "-" and (group, id_, ps) in printed:   # the same account, named by name and by OU
+        continue
+    printed.add((group, id_, ps))
     print("\t".join([group, id_, label, ps]))
 if problems:
     sys.exit("identity-center/groups:\n  " + "\n  ".join(problems))
 PY
 account_label() { awk -F'\t' -v i="$1" '$1 == i { print $2 " (" i ")"; f = 1 } END { if (!f) print i }' "${WORK}/accounts"; }
 
-# name <TAB> ID of every group in the files that already exists
+# name <TAB> ID <TAB> its name now, of every group in the files that already exists
+# or takes over one of its former names
 : > "${WORK}/group_ids"
 lookup_group() {  # lookup_group <name>: its ID, or nothing if there is no such group
   local out
@@ -223,14 +293,35 @@ lookup_group() {  # lookup_group <name>: its ID, or nothing if there is no such 
   fi
 }
 group_id() { awk -F'\t' -v n="$1" '$1 == n { print $2 }' "${WORK}/group_ids"; }
+group_now() { awk -F'\t' -v n="$1" '$1 == n { print $3 }' "${WORK}/group_ids"; }
+member_ids() {  # member_ids <group ID>: the user IDs in it, one per line
+  ids list-group-memberships --identity-store-id "${IDENTITY_STORE}" --group-id "$1" \
+    --query 'GroupMemberships[].MemberId.UserId' --output text | tr '\t' '\n' | awk 'NF && $0 != "None"'
+}
 
 # group <TAB> account ID <TAB> permission set ARN of every assignment those groups have now
 : > "${WORK}/current"
+# group <TAB> ID <TAB> name of every former group whose members are added to it
+: > "${WORK}/merge_from"
 if (( HAVE_CREDENTIALS )); then
   while IFS=$'\t' read -r -u 3 name _; do
-    id="$(lookup_group "${name}")"
+    id="$(lookup_group "${name}")" now="${name}"
+    # Its former groups that still exist: ID <TAB> name <TAB> how many members
+    : > "${WORK}/formers"
+    while IFS=$'\t' read -r -u 5 _ old; do
+      fid="$(lookup_group "${old}")"
+      [[ -z "${fid}" ]] && continue
+      members="$(member_ids "${fid}" | wc -l | tr -d ' ')"
+      printf '%s\t%s\t%s\n' "${fid}" "${old}" "${members}" >> "${WORK}/formers"
+    done 5< <(awk -F'\t' -v g="${name}" '$1 == g' "${WORK}/formerly")
+    if [[ -z "${id}" && -s "${WORK}/formers" ]]; then
+      # Take over the one with the most members, the first listed on a tie
+      IFS=$'\t' read -r id now _ < <(sort -s -t$'\t' -k3,3nr "${WORK}/formers" | head -n 1)
+    fi
+    awk -F'\t' -v g="${name}" -v keep="${id}" '$1 != keep { print g "\t" $1 "\t" $2 }' \
+      "${WORK}/formers" >> "${WORK}/merge_from"
     [[ -z "${id}" ]] && continue
-    printf '%s\t%s\n' "${name}" "${id}" >> "${WORK}/group_ids"
+    printf '%s\t%s\t%s\n' "${name}" "${id}" "${now}" >> "${WORK}/group_ids"
     sso list-account-assignments-for-principal --instance-arn "${INSTANCE}" \
       --principal-type GROUP --principal-id "${id}" \
       --query 'AccountAssignments[].[AccountId,PermissionSetArn]' --output text |
@@ -285,8 +376,11 @@ sync_set() {  # sync_set <name> <duration> <inline> <managed> <description>
     local now_duration now_description
     now_duration="$(sso describe-permission-set "${ps[@]}" --query 'PermissionSet.SessionDuration' --output text)"
     now_description="$(sso describe-permission-set "${ps[@]}" --query 'PermissionSet.Description' --output text)"
-    if [[ "${now_duration}" != "${duration}" || "${now_description}" != "${description}" ]]; then
-      change "update description and session duration (was ${now_duration})" \
+    local what=()
+    [[ "${now_description}" != "${description}" ]] && what+=("description")
+    [[ "${now_duration}" != "${duration}" ]] && what+=("session duration (was ${now_duration})")
+    if (( ${#what[@]} )); then
+      change "update $(printf '%s\n' "${what[@]}" | paste -sd, - | sed 's/,/ and /')" \
         sso update-permission-set "${ps[@]}" --description "${description}" --session-duration "${duration}"
     fi
     now_managed="$(sso list-managed-policies-in-permission-set "${ps[@]}" \
@@ -322,7 +416,8 @@ sync_set() {  # sync_set <name> <duration> <inline> <managed> <description>
 
   if [[ -n "${accounts}" ]] && (( CHANGES > before )); then
     read -r -a account_list <<<"${accounts}"
-    change "re-provision to the ${#account_list[@]} account(s) it is assigned in" provision "${ps[@]}"
+    change "re-provision where it is assigned: $(for a in "${account_list[@]}"; do account_label "${a}"; done |
+      paste -sd, - | sed 's/,/, /g')" provision "${ps[@]}"
   fi
   (( CHANGES > before )) || echo "    up to date"
 }
@@ -353,15 +448,36 @@ sync_group() {  # sync_group <name> <description>
     printf '%s\t%s\n' "${name}" "${out}" >> "${WORK}/group_ids"   # for the assignments
     return 0
   fi
+  local before="${CHANGES}" was
+  was="$(group_now "${name}")"
+  if [[ "${was}" != "${name}" ]]; then
+    change "rename ${was} to ${name}  (its members and assignments stay)" ids update-group \
+      --identity-store-id "${IDENTITY_STORE}" --group-id "${id}" --operations "$(attribute displayName "${name}")"
+  fi
   now="$(ids describe-group --identity-store-id "${IDENTITY_STORE}" --group-id "${id}" \
     --query Description --output text)"
   [[ "${now}" == "None" ]] && now=""
   if [[ -n "${description}" && "${now}" != "${description}" ]]; then
     change "update description" ids update-group --identity-store-id "${IDENTITY_STORE}" --group-id "${id}" \
-      --operations "$(python3 -c 'import json, sys; print(json.dumps([{"AttributePath": "description", "AttributeValue": sys.argv[1]}]))' "${description}")"
-  else
-    echo "    up to date"
+      --operations "$(attribute description "${description}")"
   fi
+  # Everyone in a former group is added, so taking it over takes no one's access away
+  local have from fid user
+  have="$(member_ids "${id}")"
+  while IFS=$'\t' read -r -u 5 _ fid from; do
+    while read -r -u 6 user; do
+      grep -qxF "${user}" <<<"${have}" && continue
+      have+=$'\n'"${user}"
+      change "add $(ids describe-user --identity-store-id "${IDENTITY_STORE}" --user-id "${user}" \
+          --query UserName --output text)  (from ${from}, which stays as it is)" \
+        ids create-group-membership --identity-store-id "${IDENTITY_STORE}" --group-id "${id}" \
+          --member-id "UserId=${user}"
+    done 6< <(member_ids "${fid}")
+  done 5< <(awk -F'\t' -v g="${name}" '$1 == g' "${WORK}/merge_from")
+  (( CHANGES > before )) || echo "    up to date"
+}
+attribute() {  # attribute <path> <value>: an Identity Store update operation
+  python3 -c 'import json, sys; print(json.dumps([{"AttributePath": sys.argv[1], "AttributeValue": sys.argv[2]}]))' "$1" "$2"
 }
 
 assign() {  # assign <group ID> <account ID> <permission set ARN>; waits for it to finish
@@ -428,7 +544,7 @@ others="$(cut -f1 "${WORK}/existing" | grep -vxF -f <(cut -f1 "${WORK}/definitio
 [[ -n "${others}" ]] && { echo; echo "  Permission sets not managed here, left as they are: ${others}"; }
 if (( HAVE_CREDENTIALS )); then
   others="$(ids list-groups --identity-store-id "${IDENTITY_STORE}" --query 'Groups[].DisplayName' --output text |
-    tr '\t' '\n' | grep -v '^None$' | grep -vxF -f <(cut -f1 "${WORK}/groups"; echo '') | tr '\n' ' ' || true)"
+    tr '\t' '\n' | grep -v '^None$' | grep -vxF -f <(cut -f1 "${WORK}/groups"; cut -f3 "${WORK}/group_ids"; echo '') | tr '\n' ' ' || true)"
   [[ -n "${others}" ]] && { echo; echo "  Groups not managed here, left as they are: ${others}"; }
 fi
 
@@ -459,4 +575,4 @@ CHANGES=0
 run_phase
 echo
 echo "done. People are added to the groups in the console (IAM Identity Center > Groups)"
-echo "or in your identity provider; nothing here changes who is in a group."
+echo "or in your identity provider; nothing here removes anyone from a group."

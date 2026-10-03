@@ -30,7 +30,7 @@ attached once per kind of account rather than once per account:
 
 ```
 Root
-├── management account          stays at the root — SCPs never apply to it
+├── Management                  the management account alone — SCPs never apply to it
 ├── Security       (optional)   log archive, audit
 ├── Infrastructure (optional)   shared services, network
 ├── Sandbox        (optional)   experiments, no path to production
@@ -53,20 +53,26 @@ Keeping NonProd and Prod apart is what lets production get the stricter rules �
 that pins regions or blocks deleting backups — without slowing dev down. The OU also
 says who signs in where. IAM Identity Center assigns permission sets per account, not per
 OU, so give a new account the same assignments as the others in its OU — a line in each
-[group file](identity-center/groups/) that names one of them:
+[group file](identity-center/groups/) that names one of them. The management account is
+named by its OU, `Management`, because its name is whatever the organization was created
+with:
 
-| Group        | Dev                   | Production          | Management            | Shared-Services       |
-| ------------ | --------------------- | ------------------- | --------------------- | --------------------- |
-| `Developers` | `DeveloperFullAccess` | `DeveloperReadOnly` | —                     | —                     |
-| `Platform`   | —                     | `PlatformOpsAccess` | —                     | —                     |
-| `Admins`     | —                     | —                   | `AdministratorAccess` | `AdministratorAccess` |
-| `Billing`    | —                     | —                   | `BillingManagement`   | —                     |
+| Group        | Dev                   | Production          | Management (OU)       |
+| ------------ | --------------------- | ------------------- | --------------------- |
+| `Developers` | `DeveloperFullAccess` | `DeveloperReadOnly` | —                     |
+| `Platform`   | —                     | `PlatformOps`       | —                     |
+| `Admins`     | —                     | —                   | `AdministratorAccess` |
+| `Billing`    | —                     | —                   | `BillingManagement`   |
 
 This repository creates neither accounts nor OUs nor SCPs. Make them once, in the
 management account, in **AWS Organizations → AWS accounts**, or with the CLI:
 
 ```bash
 ROOT=$(aws organizations list-roots --query 'Roots[0].Id' --output text)
+MANAGEMENT=$(aws organizations create-organizational-unit --parent-id "$ROOT" --name Management \
+               --query 'OrganizationalUnit.Id' --output text)
+aws organizations move-account --source-parent-id "$ROOT" --destination-parent-id "$MANAGEMENT" \
+  --account-id "$(aws organizations describe-organization --query Organization.MasterAccountId --output text)"
 WORKLOADS=$(aws organizations create-organizational-unit --parent-id "$ROOT" --name Workloads \
               --query 'OrganizationalUnit.Id' --output text)
 NONPROD=$(aws organizations create-organizational-unit --parent-id "$WORKLOADS" --name NonProd \
@@ -128,7 +134,7 @@ There are five permission sets, defined in
 | Permission set        | AWS managed policies               | Inline policy ([`identity-center/policies/`](identity-center/policies/))                                                                                                                                                                                               | Session |
 | --------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `AdministratorAccess` | `AdministratorAccess`              | —                                                                                                                                                                                                                                                                      | 1 hour  |
-| `PlatformOpsAccess`   | `PowerUserAccess`, `IAMFullAccess` | **Deny** access keys and console passwords, changes to the Identity Center and organization access roles, turning off security tooling, deleting backups or KMS keys, billing changes, long-term purchases                                                             | 8 hours |
+| `PlatformOps`         | `PowerUserAccess`, `IAMFullAccess` | **Deny** access keys and console passwords, changes to the Identity Center and organization access roles, turning off security tooling, deleting backups or KMS keys, billing changes, long-term purchases                                                             | 8 hours |
 | `DeveloperFullAccess` | `PowerUserAccess`                  | IAM read; `PassRole` for any role but the privileged ones; **deny** the privileged roles, networking changes, large instance / database / cache sizes, expensive services, Identity Center changes, turning off security tooling, billing changes, long-term purchases | 8 hours |
 | `DeveloperReadOnly`   | `ReadOnlyAccess`                   | **Deny** reading secret values                                                                                                                                                                                                                                         | 8 hours |
 | `BillingManagement`   | `job-function/Billing`             | Read-only view of the organization's accounts and OUs                                                                                                                                                                                                                  | 8 hours |
@@ -138,7 +144,7 @@ Redshift, OpenSearch, DynamoDB), Shield Advanced and Marketplace subscriptions �
 commits the company to a bill for a year or more. `AdministratorAccess` can still make
 them.
 
-`PlatformOpsAccess` is for running production, networking included: VPCs, subnets,
+`PlatformOps` is for running production, networking included: VPCs, subnets,
 routes, NAT and transit gateways, VPN, Direct Connect, DNS, and IAM. What it cannot do is
 the irreversible or the out-of-band: create access keys or console passwords, change the
 roles Identity Center and AWS Organizations sign in through, turn off the security tooling,
@@ -186,8 +192,11 @@ purchases" here also include registering or transferring a domain.
 ### Groups and assignments
 
 Each group is a file in [`identity-center/groups/`](identity-center/groups/), named after
-the group, listing the permission set it gets in each account. An account is its name in
-AWS Organizations or its 12-digit ID:
+the group, listing the permission set it gets in each account. An assignment names the
+account by its name in AWS Organizations or its 12-digit ID (`"account"`), or by the OU it
+sits in (`"ou"`): a path from the root, `Management` or `Workloads/Prod`, that must hold
+exactly one active account. The OU is for an account whose name is not yours to choose,
+like the management account (the `Admins` file below); `Developers` names its accounts:
 
 ```json
 {
@@ -201,10 +210,32 @@ AWS Organizations or its 12-digit ID:
 
 A new group is a new file; a new account is a line in each group that should reach it.
 Every name is checked before anything is called: a permission set that is not in
-`permission-sets.json`, an account name that matches no account (or more than one), or a
-suspended account stops the run.
+`permission-sets.json`, an account name that matches no account (or more than one), an OU
+that does not exist or does not hold exactly one active account, or a suspended account
+stops the run.
 
-**Who is in a group is not set here** — add people in the console (**IAM Identity Center →
+A group that already exists under another name is taken over rather than duplicated: list
+its older names in `"formerly"`. When the group does not exist yet, the former group with
+the most members (the first listed, on a tie) is renamed in place, so its members and its
+assignments stay. Everyone in the other former groups is added to it, so nobody loses
+access; those groups are left as they are, to delete once nothing needs them. The plan
+names each person it adds:
+
+```json
+{
+  "description": "Account administrators and break-glass access.",
+  "formerly": ["Administrators", "Admin"],
+  "assignments": [
+    { "ou": "Management", "permissionSet": "AdministratorAccess" }
+  ]
+}
+```
+
+A permission set cannot be renamed in AWS, so one that already exists is managed under its
+existing name: give the definition that name, and its policies are brought in line and it is
+re-provisioned wherever it is assigned.
+
+**Who is in a group is not set here**, beyond what a takeover adds — add people in the console (**IAM Identity Center →
 Groups**) or in your identity provider. If Identity Center takes its users and groups from
 an external identity provider (Okta, Entra ID, Google Workspace), the groups come from it
 too: create them there, let them sync, and the script finds them by name.

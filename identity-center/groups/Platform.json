@@ -1,6 +1,6 @@
 {
   "description": "Platform team: runs the infrastructure Terraform manages.",
   "assignments": [
-    { "account": "Production", "permissionSet": "PlatformOpsAccess" }
+    { "account": "Production", "permissionSet": "PlatformOps" }
   ]
 }
