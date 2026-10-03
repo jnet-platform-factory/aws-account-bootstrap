@@ -112,6 +112,26 @@
       "Resource": "*"
     },
     {
+      "Sid": "DenyBillingAndPaymentChanges",
+      "Effect": "Deny",
+      "Action": [
+        "aws-portal:Modify*",
+        "billing:Put*",
+        "billing:Redeem*",
+        "billing:Update*",
+        "cur:Put*",
+        "invoicing:Put*",
+        "payments:Create*",
+        "payments:Delete*",
+        "payments:Make*",
+        "payments:Update*",
+        "tax:BatchPut*",
+        "tax:Delete*",
+        "tax:Put*"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "DenyLongTermCommitments",
       "Effect": "Deny",
       "Action": [
