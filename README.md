@@ -41,7 +41,7 @@ Root
 Keeping NonProd and Prod apart is what lets production get the stricter rules — an SCP
 that pins regions or blocks deleting backups — without slowing dev down. The OU also
 says who signs in where. IAM Identity Center assigns permission sets per account, not per
-OU, so a new account in an OU gets the same assignments as the others there:
+OU, so give a new account the same assignments as the others in its OU:
 
 | Who        | dev (NonProd)         | production (Prod)     | management            |
 | ---------- | --------------------- | --------------------- | --------------------- |
