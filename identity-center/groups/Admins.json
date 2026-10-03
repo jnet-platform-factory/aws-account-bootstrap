@@ -1,0 +1,7 @@
+{
+  "description": "Account administrators and break-glass access.",
+  "assignments": [
+    { "account": "Management", "permissionSet": "AdministratorAccess" },
+    { "account": "Shared-Services", "permissionSet": "AdministratorAccess" }
+  ]
+}

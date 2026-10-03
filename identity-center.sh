@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
-# Create or update the IAM Identity Center permission sets defined in
-# identity-center/permission-sets.json. Run it in the AWS Organizations management
-# account, or in the account delegated to administer IAM Identity Center.
+# Create or update IAM Identity Center from the files in identity-center/: the
+# permission sets, the groups, and which group gets which permission set in which
+# account. Run it in the AWS Organizations management account, or in the account
+# delegated to administer IAM Identity Center.
 #
-# For each permission set: its description and session duration, the AWS managed
-# policies attached to it (any others are detached), and its inline policy from
-# identity-center/policies/. A permission set that changed is re-provisioned to
-# every account it is already assigned in, so the change reaches those accounts.
+#   permission-sets.json   each permission set: description, session duration, the
+#                          AWS managed policies attached to it (any others are
+#                          detached) and its inline policy from policies/. One that
+#                          changed is re-provisioned to every account it is assigned in.
+#   groups/<Group>.json    a group, created if missing, and its assignments. An
+#                          account is its name in AWS Organizations or its 12-digit ID.
 #
-# It never deletes a permission set, and never creates or changes an assignment —
-# which group gets which permission set in which account is set in the console or
-# with `aws sso-admin create-account-assignment`.
+# It never deletes a permission set or a group, never removes an assignment, and
+# never changes who is in a group. Assignments in AWS that the files do not list are
+# reported and left alone.
 #
 # Usage:
-#   ./permission-sets.sh [--dry-run] [--yes]
+#   ./identity-center.sh [--dry-run] [--yes]
 #
 #   --dry-run   print the plan and every inline policy; change nothing
 #   --yes       no confirmation (for automation)
@@ -34,7 +37,7 @@ for arg in "$@"; do
   case "${arg}" in
     --dry-run) DRY_RUN=1 ;;
     --yes|-y)  ASSUME_YES=1 ;;
-    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)         die "unknown argument ${arg}" ;;
   esac
 done
@@ -42,17 +45,20 @@ done
 command -v python3 >/dev/null || die "python3 is required"
 command -v aws     >/dev/null || die "the AWS CLI is required"
 
-sso() { aws sso-admin ${SSO_REGION:+--region "${SSO_REGION}"} "$@"; }
+sso() { aws sso-admin     ${SSO_REGION:+--region "${SSO_REGION}"} "$@"; }
+ids() { aws identitystore ${SSO_REGION:+--region "${SSO_REGION}"} "$@"; }
 
 WORK="$(mktemp -d)"; trap 'rm -rf "${WORK}"' EXIT
 
-# One line per permission set, checked before anything is called:
-#   name <TAB> session duration <TAB> inline policy file or - <TAB> managed policy ARNs or - <TAB> description
-python3 - "${DEFS_DIR}" > "${WORK}/definitions" <<'PY'
+# Everything is checked before anything is called. One line each:
+#   definitions  name <TAB> session duration <TAB> inline policy file or - <TAB> managed policy ARNs or - <TAB> description
+#   groups       name <TAB> description
+#   assignments  group <TAB> account name or ID <TAB> permission set
+python3 - "${DEFS_DIR}" "${WORK}" > "${WORK}/definitions" <<'PY'
 import json, re, sys
 from pathlib import Path
 
-defs = Path(sys.argv[1])
+defs, work = Path(sys.argv[1]), Path(sys.argv[2])
 problems, names = [], set()
 for s in json.load(open(defs / "permission-sets.json"))["permissionSets"]:
     name = s.get("name", "")
@@ -76,6 +82,9 @@ for s in json.load(open(defs / "permission-sets.json"))["permissionSets"]:
     if inline:
         try:
             json.load(open(defs / inline))
+            size = len("".join(open(defs / inline).read().split()))
+            if size > 10240:  # Identity Center's limit, whitespace not counted
+                problems.append(f"{name}: inline policy {inline} is {size} characters; the limit is 10240")
         except (OSError, ValueError) as e:
             problems.append(f"{name}: inline policy {inline}: {e}")
     if not managed and not inline:
@@ -83,16 +92,49 @@ for s in json.load(open(defs / "permission-sets.json"))["permissionSets"]:
     print("\t".join([name, duration, inline or "-", " ".join(managed) or "-", description]))
 if problems:
     sys.exit("identity-center/permission-sets.json:\n  " + "\n  ".join(problems))
+
+groups, assignments = [], []
+for path in sorted((defs / "groups").glob("*.json")):
+    where, group = f"identity-center/groups/{path.name}", path.stem
+    if not re.fullmatch(r"[\w+=,.@ -]{1,128}", group):
+        problems.append(f"{where}: a group name (the file name) is 1-128 of letters, digits, spaces and +=,.@-_")
+    try:
+        g = json.load(open(path))
+    except ValueError as e:
+        problems.append(f"{where}: {e}")
+        continue
+    description = g.get("description", "")
+    if len(description) > 1024 or not all(32 <= ord(c) < 127 for c in description):
+        problems.append(f"{where}: the description must be at most 1024 plain ASCII characters")
+    groups.append(f"{group}\t{description}")
+    seen = set()
+    for a in g.get("assignments", []):
+        account, ps = str(a.get("account", "")).strip(), a.get("permissionSet", "")
+        if not account or "\t" in account:
+            problems.append(f"{where}: an assignment without an account")
+        elif ps not in names:
+            problems.append(f"{where}: {ps!r} in {account} is not a permission set in permission-sets.json")
+        elif (account, ps) in seen:
+            problems.append(f"{where}: {ps} in {account} is listed twice")
+        else:
+            seen.add((account, ps))
+            assignments.append(f"{group}\t{account}\t{ps}")
+(work / "groups").write_text("".join(f"{l}\n" for l in groups))
+(work / "assignments").write_text("".join(f"{l}\n" for l in assignments))
+if problems:
+    sys.exit("identity-center/groups:\n  " + "\n  ".join(problems))
 PY
 
 # --- Where ---------------------------------------------------------------------
-if INSTANCE="$(sso list-instances --query 'Instances[0].InstanceArn' --output text 2>/dev/null)" &&
+if read -r INSTANCE IDENTITY_STORE < <(sso list-instances \
+     --query 'Instances[0].[InstanceArn,IdentityStoreId]' --output text 2>/dev/null) &&
    [[ -n "${INSTANCE}" && "${INSTANCE}" != "None" ]]; then
   HAVE_CREDENTIALS=1
   ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 elif (( DRY_RUN )); then
   HAVE_CREDENTIALS=0
-  INSTANCE="(no credentials or no instance: every permission set is shown as new)"
+  INSTANCE="(no credentials or no instance: everything is shown as new)"
+  IDENTITY_STORE="-"
   ACCOUNT_ID="-"
 else
   die "no IAM Identity Center instance found. Run this in the management account (or the delegated
@@ -111,10 +153,94 @@ if (( HAVE_CREDENTIALS )); then
   done < <(sso list-permission-sets --instance-arn "${INSTANCE}" --query 'PermissionSets[]' --output text | tr '\t' '\n')
 fi
 existing_arn() { awk -F'\t' -v n="$1" '$1 == n { print $2 }' "${WORK}/existing"; }
+existing_name() { awk -F'\t' -v a="$1" '$2 == a { print $1 }' "${WORK}/existing"; }
+
+# The organization's accounts: id <TAB> name <TAB> state. Organizations reports
+# State, and Status before it; whichever is there is used.
+: > "${WORK}/accounts"
+: > "${WORK}/accounts.error"
+if (( HAVE_CREDENTIALS )); then
+  aws organizations list-accounts --query 'Accounts[].[Id,Name,State,Status]' --output text \
+    > "${WORK}/accounts" 2> "${WORK}/accounts.error" || true
+fi
+
+# Each assignment with its account resolved:
+#   group <TAB> account ID (- without credentials) <TAB> label for the plan <TAB> permission set
+python3 - "${WORK}" "${HAVE_CREDENTIALS}" > "${WORK}/resolved" <<'PY'
+import re, sys
+from pathlib import Path
+
+work, have_credentials = Path(sys.argv[1]), sys.argv[2] == "1"
+accounts = {}
+for line in (work / "accounts").read_text().splitlines():
+    if line.strip():
+        id_, name, state, status = (line.split("\t") + ["None"] * 4)[:4]
+        accounts[id_] = (name, state if state != "None" else status)
+error = (work / "accounts.error").read_text().strip()
+problems = []
+for line in (work / "assignments").read_text().splitlines():
+    group, account, ps = line.split("\t")
+    where = f"groups/{group}.json: {ps} in {account}"
+    if not have_credentials:
+        id_, label = "-", account
+    elif re.fullmatch(r"\d{12}", account):
+        id_ = account
+        if accounts and id_ not in accounts:
+            problems.append(f"{where}: no account {id_} in this organization")
+            continue
+        label = f"{accounts[id_][0]} ({id_})" if id_ in accounts else id_
+    elif not accounts:
+        problems.append(f"{where}: cannot look up account names ({error or 'no accounts listed'}); "
+                        "give the 12-digit account ID instead")
+        continue
+    else:
+        matches = [i for i, (n, _) in accounts.items() if n == account]
+        if len(matches) != 1:
+            known = ", ".join(sorted(n for n, _ in accounts.values()))
+            problems.append(f"{where}: " + (f"{len(matches)} accounts are named {account}; give the ID"
+                            if matches else f"no account named {account} (there are: {known})"))
+            continue
+        id_ = matches[0]
+        label = f"{account} ({id_})"
+    if id_ in accounts and accounts[id_][1] != "ACTIVE":
+        problems.append(f"{where}: account {id_} is {accounts[id_][1]}")
+        continue
+    print("\t".join([group, id_, label, ps]))
+if problems:
+    sys.exit("identity-center/groups:\n  " + "\n  ".join(problems))
+PY
+account_label() { awk -F'\t' -v i="$1" '$1 == i { print $2 " (" i ")"; f = 1 } END { if (!f) print i }' "${WORK}/accounts"; }
+
+# name <TAB> ID of every group in the files that already exists
+: > "${WORK}/group_ids"
+lookup_group() {  # lookup_group <name>: its ID, or nothing if there is no such group
+  local out
+  if out="$(ids get-group-id --identity-store-id "${IDENTITY_STORE}" --query GroupId --output text \
+       --alternate-identifier "{\"UniqueAttribute\":{\"AttributePath\":\"displayName\",\"AttributeValue\":\"$1\"}}" 2>&1)"; then
+    echo "${out}"
+  elif [[ "${out}" != *ResourceNotFoundException* ]]; then
+    die "looking up group $1: ${out}"
+  fi
+}
+group_id() { awk -F'\t' -v n="$1" '$1 == n { print $2 }' "${WORK}/group_ids"; }
+
+# group <TAB> account ID <TAB> permission set ARN of every assignment those groups have now
+: > "${WORK}/current"
+if (( HAVE_CREDENTIALS )); then
+  while IFS=$'\t' read -r -u 3 name _; do
+    id="$(lookup_group "${name}")"
+    [[ -z "${id}" ]] && continue
+    printf '%s\t%s\n' "${name}" "${id}" >> "${WORK}/group_ids"
+    sso list-account-assignments-for-principal --instance-arn "${INSTANCE}" \
+      --principal-type GROUP --principal-id "${id}" \
+      --query 'AccountAssignments[].[AccountId,PermissionSetArn]' --output text |
+      awk -v g="${name}" 'NF == 2 { print g "\t" $1 "\t" $2 }' >> "${WORK}/current"
+  done 3< "${WORK}/groups"
+fi
 
 # --- Plan, then apply ----------------------------------------------------------
-# sync_set runs twice: in the plan phase it only says what would change; in the
-# apply phase it says the same and does it.
+# Each sync_ function runs twice: in the plan phase it only says what would change;
+# in the apply phase it says the same and does it.
 PHASE=plan
 CHANGES=0
 change() {  # change <what> <command...>
@@ -124,6 +250,16 @@ change() {  # change <what> <command...>
   if [[ "${PHASE}" == apply ]]; then "$@" >/dev/null || die "${what}: failed"; fi
 }
 has() { [[ " $1 " == *" $2 "* ]]; }   # has <space-separated list> <word>
+
+wait_for() {  # wait_for <what> <sso describe command...>: polls until it is no longer IN_PROGRESS
+  local what="$1" status=""; shift
+  for _ in $(seq 60); do
+    status="$(sso "$@" --output text)"
+    [[ "${status}" != "IN_PROGRESS" ]] && break
+    sleep 2
+  done
+  [[ "${status}" == "SUCCEEDED" ]] || die "${what} ended ${status}"
+}
 
 sync_set() {  # sync_set <name> <duration> <inline> <managed> <description>
   local name="$1" duration="$2" inline="$3" managed="$4" description="$5"
@@ -142,6 +278,7 @@ sync_set() {  # sync_set <name> <duration> <inline> <managed> <description>
         --description "${description}" --session-duration "${duration}" \
         --tags Key=ManagedBy,Value=aws-account-bootstrap \
         --query 'PermissionSet.PermissionSetArn' --output text)"
+      printf '%s\t%s\n' "${name}" "${arn}" >> "${WORK}/existing"   # for the assignments
       ps=(--instance-arn "${INSTANCE}" --permission-set-arn "${arn}")
     fi
   else
@@ -191,43 +328,120 @@ sync_set() {  # sync_set <name> <duration> <inline> <managed> <description>
 }
 
 provision() {  # provision --instance-arn <i> --permission-set-arn <ps>; waits for it to finish
-  local request status
+  local request
   request="$(sso provision-permission-set "$@" --target-type ALL_PROVISIONED_ACCOUNTS \
     --query 'PermissionSetProvisioningStatus.RequestId' --output text)"
-  for _ in $(seq 60); do
-    status="$(sso describe-permission-set-provisioning-status --instance-arn "$2" \
-      --provision-permission-set-request-id "${request}" --query 'PermissionSetProvisioningStatus.Status' --output text)"
-    [[ "${status}" != "IN_PROGRESS" ]] && break
-    sleep 2
-  done
-  [[ "${status}" == "SUCCEEDED" ]] || die "provisioning ${4##*/} ended ${status}"
+  wait_for "provisioning ${4##*/}" describe-permission-set-provisioning-status --instance-arn "$2" \
+    --provision-permission-set-request-id "${request}" --query 'PermissionSetProvisioningStatus.Status'
+}
+
+sync_group() {  # sync_group <name> <description>
+  local name="$1" description="$2" id now out
+  id="$(group_id "${name}")"
+  echo "  Group  ${name}"
+  if [[ -z "${id}" ]]; then
+    CHANGES=$((CHANGES + 1))
+    echo "    create group"
+    [[ "${PHASE}" == apply ]] || return 0
+    if ! out="$(ids create-group --identity-store-id "${IDENTITY_STORE}" --display-name "${name}" \
+         ${description:+--description "${description}"} --query GroupId --output text 2>&1)"; then
+      die "creating group ${name}: ${out}
+       If IAM Identity Center takes its users and groups from an external identity provider
+       (Okta, Entra ID, Google Workspace…), groups come from there: create ${name} in it, let
+       it sync, and run this again."
+    fi
+    printf '%s\t%s\n' "${name}" "${out}" >> "${WORK}/group_ids"   # for the assignments
+    return 0
+  fi
+  now="$(ids describe-group --identity-store-id "${IDENTITY_STORE}" --group-id "${id}" \
+    --query Description --output text)"
+  [[ "${now}" == "None" ]] && now=""
+  if [[ -n "${description}" && "${now}" != "${description}" ]]; then
+    change "update description" ids update-group --identity-store-id "${IDENTITY_STORE}" --group-id "${id}" \
+      --operations "$(python3 -c 'import json, sys; print(json.dumps([{"AttributePath": "description", "AttributeValue": sys.argv[1]}]))' "${description}")"
+  else
+    echo "    up to date"
+  fi
+}
+
+assign() {  # assign <group ID> <account ID> <permission set ARN>; waits for it to finish
+  local request
+  request="$(sso create-account-assignment --instance-arn "${INSTANCE}" \
+    --principal-type GROUP --principal-id "$1" --target-type AWS_ACCOUNT --target-id "$2" \
+    --permission-set-arn "$3" --query 'AccountAssignmentCreationStatus.RequestId' --output text)" || return 1
+  wait_for "assigning ${3##*/} in $2" describe-account-assignment-creation-status --instance-arn "${INSTANCE}" \
+    --account-assignment-creation-request-id "${request}" --query 'AccountAssignmentCreationStatus.Status'
+}
+
+sync_assignments() {  # sync_assignments <group>: its assignments, then the ones only AWS has
+  local group="$1" gid arn account label ps
+  gid="$(group_id "${group}")"
+  echo "  ${group}"
+  while IFS=$'\t' read -r -u 4 _ account label ps; do
+    arn="$(existing_arn "${ps}")"
+    if [[ -n "${gid}" && -n "${arn}" ]] && grep -qxF "${group}"$'\t'"${account}"$'\t'"${arn}" "${WORK}/current"; then
+      echo "    ok      ${ps} in ${label}"
+    elif [[ -z "${gid}" || -z "${arn}" ]] && [[ "${PHASE}" == plan ]]; then
+      CHANGES=$((CHANGES + 1))
+      echo "    assign ${ps} in ${label}  (after it is created)"
+    else
+      change "assign ${ps} in ${label}" assign "${gid}" "${account}" "${arn}"
+    fi
+  done 4< <(awk -F'\t' -v g="${group}" '$1 == g' "${WORK}/resolved")
+  [[ "${PHASE}" == plan ]] || return 0
+
+  # Report only: assignments this group has that its file does not list.
+  while IFS=$'\t' read -r _ account arn; do
+    ps="$(existing_name "${arn}")"
+    if ! awk -F'\t' -v g="${group}" -v a="${account}" -v p="${ps}" \
+         '$1 == g && $2 == a && $4 == p { f = 1 } END { exit !f }' "${WORK}/resolved"; then
+      echo "    not in groups/${group}.json, left as is: ${ps:-${arn##*/}} in $(account_label "${account}")"
+    fi
+  done < <(awk -F'\t' -v g="${group}" '$1 == g' "${WORK}/current")
 }
 
 run_phase() {
   local name duration inline managed description
-  # fd 3, so nothing inside the loop can read the definitions as its stdin
+  # fd 3, so nothing inside a loop can read the work file as its stdin
+  echo; echo "Permission sets"
   while IFS=$'\t' read -r -u 3 name duration inline managed description; do
     sync_set "${name}" "${duration}" "${inline}" "${managed}" "${description}"
   done 3< "${WORK}/definitions"
+
+  echo; echo "Groups"
+  while IFS=$'\t' read -r -u 3 name description; do
+    sync_group "${name}" "${description}"
+  done 3< "${WORK}/groups"
+
+  echo; echo "Assignments"
+  while IFS=$'\t' read -r -u 3 name _; do
+    sync_assignments "${name}"
+  done 3< "${WORK}/groups"
 }
 
 echo
 echo "IAM Identity Center ${INSTANCE}"
-echo "  account ${ACCOUNT_ID}${SSO_REGION:+, region ${SSO_REGION}}"
+echo "  account ${ACCOUNT_ID}${SSO_REGION:+, region ${SSO_REGION}}, identity store ${IDENTITY_STORE}"
 run_phase
 
 others="$(cut -f1 "${WORK}/existing" | grep -vxF -f <(cut -f1 "${WORK}/definitions") | tr '\n' ' ' || true)"
-[[ -n "${others}" ]] && { echo; echo "  Not managed here, left as they are: ${others}"; }
+[[ -n "${others}" ]] && { echo; echo "  Permission sets not managed here, left as they are: ${others}"; }
+if (( HAVE_CREDENTIALS )); then
+  others="$(ids list-groups --identity-store-id "${IDENTITY_STORE}" --query 'Groups[].DisplayName' --output text |
+    tr '\t' '\n' | grep -v '^None$' | grep -vxF -f <(cut -f1 "${WORK}/groups"; echo '') | tr '\n' ' ' || true)"
+  [[ -n "${others}" ]] && { echo; echo "  Groups not managed here, left as they are: ${others}"; }
+fi
 
 if (( DRY_RUN )); then
   while IFS=$'\t' read -r -u 3 _ _ inline _ _; do
     [[ "${inline}" == "-" ]] && continue
     echo; echo "── ${inline}"; cat "${DEFS_DIR}/${inline}"
+    [[ -z "$(tail -c 1 "${DEFS_DIR}/${inline}")" ]] || echo   # a file without a final newline
     if (( HAVE_CREDENTIALS )); then
       findings="$(aws accessanalyzer validate-policy --policy-type IDENTITY_POLICY \
         --policy-document "file://${DEFS_DIR}/${inline}" \
         --query 'findings[].[findingType,issueCode]' --output text 2>&1 || true)"
-      echo "   Access Analyzer: ${findings:-no findings}"
+      echo "   Access Analyzer: ${findings:-no findings}" | sed '2,$s/^/                    /'
     fi
   done 3< "${WORK}/definitions"
   exit 0
@@ -240,12 +454,9 @@ if (( ! ASSUME_YES )); then
   [[ "${answer}" == "y" || "${answer}" == "Y" ]] || exit 1
 fi
 
-echo
 PHASE=apply
 CHANGES=0
 run_phase
 echo
-echo "done. Assign them in the console (IAM Identity Center > AWS accounts) or with"
-echo "  aws sso-admin create-account-assignment --instance-arn ${INSTANCE} \\"
-echo "    --target-type AWS_ACCOUNT --target-id <account id> --permission-set-arn <arn> \\"
-echo "    --principal-type GROUP --principal-id <group id>"
+echo "done. People are added to the groups in the console (IAM Identity Center > Groups)"
+echo "or in your identity provider; nothing here changes who is in a group."
