@@ -13,5 +13,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Split so the summary can say which half failed; `make test` re-runs
+      # the (few-second) lint as its prerequisite.
+      - name: lint (shellcheck, policy JSON, Python compile)
+        id: lint
+        run: make lint
       - name: lint and dry-run (no AWS needed)
+        id: test
         run: make test
+      - name: Summary
+        if: always()
+        continue-on-error: true
+        uses: jnet-platform-factory/.github/actions/job-summary@v0.0.1
+        with:
+          title: lint
+          status: ${{ job.status }}
+          rows: |
+            Branch: ${{ github.head_ref || github.ref_name }}
+            Lint (make lint): ${{ steps.lint.outcome == 'success' && '✅ passed' || steps.lint.outcome == 'failure' && '❌ failed' || steps.lint.outcome == 'skipped' && '⏭️ skipped' || '🚫 cancelled' }}
+            Dry-run scenarios (make test): ${{ steps.test.outcome == 'success' && '✅ passed' || steps.test.outcome == 'failure' && '❌ failed' || steps.test.outcome == 'skipped' && '⏭️ skipped' || '🚫 cancelled' }}
