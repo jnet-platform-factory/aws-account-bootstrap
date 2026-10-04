@@ -132,6 +132,22 @@
       "Effect": "Allow",
       "Action": "apigateway:GET",
       "Resource": "arn:aws:apigateway:*::/apikeys/*"
+    },
+    {
+      "Sid": "SarApplicationTemplates",
+      "Effect": "Allow",
+      "Action": [
+        "serverlessrepo:GetApplication",
+        "serverlessrepo:CreateCloudFormationTemplate",
+        "serverlessrepo:GetCloudFormationTemplate"
+      ],
+      "Resource": "arn:aws:serverlessrepo:*:*:applications/*"
+    },
+    {
+      "Sid": "ReadSarMintedTemplates",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::awsserverlessrepo-changesets-*/*"
     }
   ]
 }

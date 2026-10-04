@@ -100,7 +100,6 @@ Renaming an OU keeps its id and the SCPs attached to it. In an organization mana
 change made directly in Organizations shows up as drift, and the OU has to be
 re-registered.
 
-
 ```bash
 # 1. Once, in the management account: the permission sets, groups and assignments everyone signs in with
 make sso-plan  PROFILE=management   # shows what would change
@@ -728,17 +727,19 @@ roles' job.
 
 ### App deploy ([`app-deploy-policy.json`](policies/app-deploy-policy.json))
 
-| Statement                   | Effect                                                                                |
-| --------------------------- | ------------------------------------------------------------------------------------- |
-| `DriveStacks`               | Create, update, delete and roll back stacks and change sets in this account           |
-| `UseTransforms`             | Use AWS-owned transforms such as `AWS::Serverless-2016-10-31`                         |
-| `AccountLevelReads`         | Template validation, stack listing, ECR login                                         |
-| `PassOnlyTheExecutionRole`  | `iam:PassRole` for `app-cfn-exec-role`, and only to CloudFormation                    |
-| `SamArtifactBucket`         | The `aws-sam-cli-managed-default-*` bucket `resolve_s3 = true` creates and uploads to |
-| `PushFunctionImages`        | Push container images for `PackageType: Image` functions                              |
-| `ResolveTemplateParameters` | Read SSM parameters referenced by `AWS::SSM::Parameter::Value` template parameters    |
-| `PostDeploySteps`           | Invoke functions and read their logs — smoke tests, migration runners                 |
-| `ReadStackApiKeys`          | Read API key values (`GET /apikeys/*` only) — post-deploy e2e runs                    |
+| Statement                   | Effect                                                                                  |
+| --------------------------- | --------------------------------------------------------------------------------------- |
+| `DriveStacks`               | Create, update, delete and roll back stacks and change sets in this account             |
+| `UseTransforms`             | Use AWS-owned transforms such as `AWS::Serverless-2016-10-31`                           |
+| `AccountLevelReads`         | Template validation, stack listing, ECR login                                           |
+| `PassOnlyTheExecutionRole`  | `iam:PassRole` for `app-cfn-exec-role`, and only to CloudFormation                      |
+| `SamArtifactBucket`         | The `aws-sam-cli-managed-default-*` bucket `resolve_s3 = true` creates and uploads to   |
+| `PushFunctionImages`        | Push container images for `PackageType: Image` functions                                |
+| `ResolveTemplateParameters` | Read SSM parameters referenced by `AWS::SSM::Parameter::Value` template parameters      |
+| `PostDeploySteps`           | Invoke functions and read their logs — smoke tests, migration runners                   |
+| `ReadStackApiKeys`          | Read API key values (`GET /apikeys/*` only) — post-deploy e2e runs                      |
+| `SarApplicationTemplates`   | Ask SAR to mint a template for a version of an application shared with this account     |
+| `ReadSarMintedTemplates`    | Let CloudFormation fetch that template (`awsserverlessrepo-changesets-*`) as the caller |
 
 ### App execution ([`app-cfn-exec-policy.json`](policies/app-cfn-exec-policy.json))
 
@@ -996,6 +997,11 @@ expands the nested application by calling `serverlessrepo` and creates it as a n
 `AWS::CloudFormation::Stack`, and with `--role-arn` both happen as the execution role,
 which has neither `serverlessrepo:*` nor CloudFormation stack permissions. Deploy from
 source as above until it does.
+
+Deploying a published application **as its own stack** does work: `app-deploy-role` mints
+the version's template (`serverlessrepo create-cloud-formation-template`) and creates a
+change set from its URL with `--role-arn app-cfn-exec-role`. That is how the tenant
+platform repos deploy the events forwarder.
 
 ### events-observability
 
