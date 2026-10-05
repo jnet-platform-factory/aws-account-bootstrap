@@ -31,18 +31,29 @@
     {
       "Sid": "ApiGatewayVpcLinksOnly",
       "Effect": "Allow",
-      "Action": [
-        "apigateway:GET",
-        "apigateway:POST",
-        "apigateway:PATCH",
-        "apigateway:DELETE",
-        "apigateway:PUT"
-      ],
+      "Action": "apigateway:*",
       "Resource": [
         "arn:aws:apigateway:*::/vpclinks",
         "arn:aws:apigateway:*::/vpclinks/*",
         "arn:aws:apigateway:*::/tags/*"
       ]
+    },
+    {
+      "Sid": "EventBridgeBusesOnly",
+      "Effect": "Allow",
+      "Action": [
+        "events:CreateEventBus",
+        "events:DeleteEventBus",
+        "events:DescribeEventBus",
+        "events:UpdateEventBus",
+        "events:ListEventBuses",
+        "events:PutPermission",
+        "events:RemovePermission",
+        "events:TagResource",
+        "events:UntagResource",
+        "events:ListTagsForResource"
+      ],
+      "Resource": "*"
     },
     {
       "Sid": "IamExceptPassRole",

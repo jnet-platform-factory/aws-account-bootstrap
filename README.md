@@ -714,7 +714,8 @@ Denies hold whatever else is ever attached to a role.
 | Statement                          | Effect                                                                                                      |
 | ---------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `ServicesTerraformManages`         | `<service>:*` for each service your Terraform manages                                                       |
-| `ApiGatewayVpcLinksOnly`           | API Gateway, limited to VPC links — an example of scoping a service to the one resource type Terraform owns |
+| `ApiGatewayVpcLinksOnly`           | `apigateway:*` on VPC links and their tags only — an example of scoping a service to the one resource type Terraform owns. Every action, because creating a tagged VPC link is also authorised as `apigateway:TagResource` |
+| `EventBridgeBusesOnly`             | EventBridge, limited to event buses: create, describe, update, delete, their resource policy and tags — not rules or targets |
 | `IamExceptPassRole`                | IAM read and write, without `PassRole`                                                                      |
 | `PassRoleToConfiguredServices`     | `iam:PassRole` only to the listed services                                                                  |
 | `ReadOnlyLookups`                  | `organizations:DescribeOrganization`, `sts:GetCallerIdentity`                                               |
@@ -722,8 +723,10 @@ Denies hold whatever else is ever attached to a role.
 
 The default service list fits an estate built from VPCs, RDS, DynamoDB, S3, CloudFront,
 Cognito, Route 53, ACM, SES, SNS, Secrets Manager, SSM, KMS, ECR, OpenSearch, AppConfig
-and AWS Config. Lambda, EventBridge and SQS are deliberately absent: they are the app
-roles' job.
+and AWS Config. Lambda, SQS and EventBridge rules are deliberately absent: they are the
+app roles' job. The event bus itself is the platform's (several repositories publish to
+it, so it must outlive any one app stack), which is why `EventBridgeBusesOnly` lets
+Terraform own buses and nothing else in EventBridge.
 
 ### App deploy ([`app-deploy-policy.json`](policies/app-deploy-policy.json))
 
