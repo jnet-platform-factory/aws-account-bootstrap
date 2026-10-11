@@ -1,0 +1,45 @@
+# Backstage catalog entry (JNET-3062 spike draft).
+# Describes this repo for a developer portal: what it is, who owns it, and what it
+# creates in each account. Harmless if no portal reads it.
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: aws-account-bootstrap
+  title: AWS account bootstrap
+  description: >-
+    Keyless, scoped deploy roles for an AWS account (platform-deploy-role for
+    Terraform, app-deploy-role and app-cfn-exec-role for SAM), each repository's
+    GitHub environments and variables, a Terragrunt root.hcl and GitHub Actions
+    workflows - and, in the management account, the IAM Identity Center
+    permission sets and groups.
+  annotations:
+    github.com/project-slug: jnet-platform-factory/aws-account-bootstrap
+    jira/project-key: JNET
+  tags: [bash, iam, oidc, identity-center]
+  links:
+    - url: https://cargonaut-team.atlassian.net/browse/JNET-3040
+      title: Access model (JNET-3040)
+spec:
+  type: tool
+  lifecycle: production
+  owner: group:platform
+  system: platform-factory
+  dependsOn:
+    - resource:github-oidc-deploy-roles
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: github-oidc-deploy-roles
+  title: GitHub OIDC deploy roles
+  description: >-
+    Created in every workload account by bootstrap-account.sh - the
+    token.actions.githubusercontent.com OIDC provider, platform-deploy-role,
+    app-deploy-role, app-cfn-exec-role and lambda-test-role. Their ARNs reach
+    each repository as the GitHub environment variables AWS_PLATFORM_ROLE_ARN,
+    AWS_APP_ROLE_ARN and AWS_CFN_EXEC_ROLE_ARN.
+  tags: [iam, oidc]
+spec:
+  type: iam-role
+  owner: group:platform
+  system: platform-factory
